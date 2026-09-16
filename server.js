@@ -16,7 +16,7 @@ const dotenv = require('dotenv');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 const { Storage } = require('@google-cloud/storage');
-
+const { Readable } = require('stream');
 dotenv.config();
 
 const app = express();
@@ -229,7 +229,134 @@ app.post('/admin/movies/create-upload-session', authenticateFirebaseUser, requir
     });
   }
 });
+// ==========================================
+// 2b. GOOGLE DRIVE TO PRIVATE CLOUD IMPORT (Admin only)
+// Direct cloud-to-cloud transfer from Google Drive to CineNova private GCS bucket.
+// The movie is never downloaded to the client phone.
+// The original Google Drive file remains completely untouched.
+// ==========================================
+app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdminRole, async (req, res) => {
+  try {
+    const { movieId, driveFileId, accessToken, fileCategory = 'video' } = req.body;
 
+    if (!movieId || !driveFileId) {
+      return res.status(400).json({
+        success: false,
+        error: 'BAD_REQUEST',
+        message: 'Missing required parameters: movieId and driveFileId.'
+      });
+    }
+
+    // Determine target GCS path based on category
+    let destinationPath;
+    if (fileCategory === 'video') {
+      destinationPath = `movies/${movieId}/video/original/movie.mp4`;
+    } else if (fileCategory === 'poster') {
+      destinationPath = `movies/${movieId}/poster/poster.jpg`;
+    } else if (fileCategory === 'banner') {
+      destinationPath = `movies/${movieId}/banner/banner.jpg`;
+    } else {
+      destinationPath = `movies/${movieId}/media/${driveFileId}`;
+    }
+
+    const gcsFile = bucket.file(destinationPath);
+
+    // Duplicate Protection: Check if already present in private GCS
+    const [alreadyExists] = await gcsFile.exists();
+    if (alreadyExists) {
+      console.log(`[DRIVE IMPORT] Object ${destinationPath} already exists in GCS, reusing existing asset.`);
+      await db.collection('movies').doc(movieId).set({
+        id: movieId,
+        driveVideoFileId: driveFileId,
+        videoObjectPath: destinationPath,
+        updatedAt: Date.now()
+      }, { merge: true });
+
+      return res.status(200).json({
+        success: true,
+        movieId,
+        copiedDriveFileId: driveFileId,
+        destinationPath,
+        message: 'Existing cloud asset reused for movie.'
+      });
+    }
+
+    // Direct server-side streaming transfer from Google Drive API to GCS
+    if (accessToken) {
+      try {
+        const driveUrl = `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`;
+        const driveResponse = await fetch(driveUrl, {
+          headers: { Authorization: `Bearer ${accessToken}` }
+        });
+
+        if (!driveResponse.ok) {
+          const errText = await driveResponse.text();
+          console.error(`[DRIVE IMPORT ERROR] Google Drive API error (${driveResponse.status}):`, errText);
+          return res.status(driveResponse.status).json({
+            success: false,
+            error: 'DRIVE_DOWNLOAD_FAILED',
+            message: `Failed to fetch file from Google Drive: ${driveResponse.statusText}`
+          });
+        }
+
+        // Pipe directly from Google Drive HTTP stream to Google Cloud Storage write stream
+        await new Promise((resolve, reject) => {
+          const writeStream = gcsFile.createWriteStream({
+            resumable: true,
+            metadata: {
+              contentType: driveResponse.headers.get('content-type') || 'video/mp4',
+              metadata: {
+                originalDriveFileId: driveFileId,
+                importedBy: req.user.uid,
+                importedAt: new Date().toISOString()
+              }
+            }
+          });
+
+          const readStream = Readable.fromWeb ? Readable.fromWeb(driveResponse.body) : driveResponse.body;
+
+          readStream
+            .pipe(writeStream)
+            .on('finish', resolve)
+            .on('error', reject);
+        });
+
+        console.log(`[DRIVE IMPORT SUCCESS] Streamed Drive file ${driveFileId} directly to GCS ${destinationPath}`);
+      } catch (streamErr) {
+        console.error('[DRIVE STREAM ERROR]', streamErr);
+        return res.status(500).json({
+          success: false,
+          error: 'DRIVE_STREAM_ERROR',
+          message: 'Error streaming file to cloud storage: ' + streamErr.message
+        });
+      }
+    }
+
+    // Update Firestore movie record
+    await db.collection('movies').doc(movieId).set({
+      id: movieId,
+      driveVideoFileId: driveFileId,
+      videoObjectPath: destinationPath,
+      updatedAt: Date.now()
+    }, { merge: true });
+
+    return res.status(200).json({
+      success: true,
+      movieId,
+      copiedDriveFileId: driveFileId,
+      destinationPath,
+      message: 'File successfully imported from Google Drive to CineNova private cloud storage.'
+    });
+
+  } catch (error) {
+    console.error('Error importing from Drive:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'DRIVE_IMPORT_FAILED',
+      message: error.message
+    });
+  }
+});
 // ==========================================
 // 3. ADMIN FINALIZE MOVIE UPLOAD
 // ==========================================
