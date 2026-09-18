@@ -1,8 +1,4 @@
-// ============================================================
-// CINENOVA BACKEND - server.js
-// PART 1/3
-// Config + Firebase Admin + GCS + Auth + Admin + Upload
-// ============================================================
+"use strict";
 
 require("dotenv").config();
 
@@ -10,16 +6,15 @@ const express = require("express");
 const cors = require("cors");
 const morgan = require("morgan");
 const crypto = require("crypto");
-const jwt = require("jsonwebtoken");
-const { google } = require("googleapis");
 const admin = require("firebase-admin");
 const { Storage } = require("@google-cloud/storage");
+const { Readable } = require("stream");
 
 const app = express();
 
-// ============================================================
-// BASIC CONFIG
-// ============================================================
+/* ============================================================
+   CONFIG
+============================================================ */
 
 const PORT = Number(process.env.PORT || 8080);
 
@@ -30,12 +25,7 @@ const PROJECT_ID =
 
 const GCS_BUCKET_NAME =
   process.env.GCS_BUCKET_NAME ||
-  "cinenova-1232d.firebasestorage.app";
-
-const PUBLIC_BASE_URL =
-  process.env.PUBLIC_BASE_URL ||
-  process.env.RENDER_EXTERNAL_URL ||
-  "";
+  "cinenova-movies-vault-secure";
 
 const JWT_SECRET = process.env.JWT_SECRET || "";
 
@@ -58,45 +48,43 @@ const ALLOW_LEGACY_DRIVE_TOKEN =
   process.env.ALLOW_LEGACY_DRIVE_TOKEN === "true";
 
 const FREE_DAILY_LIMIT_SECONDS = 14400;
-
 const PREMIUM_PRICE_INR = 10;
-
 const PREMIUM_DURATION_DAYS = 30;
 
-// ============================================================
-// PRODUCTION ENV VALIDATION
-// ============================================================
+/* ============================================================
+   PRODUCTION CONFIG CHECK
+============================================================ */
 
 if (process.env.NODE_ENV === "production") {
-  const requiredEnv = [
+  const required = [
     "FIREBASE_CONFIG_JSON",
     "GCS_BUCKET_NAME",
     "GOOGLE_CLOUD_PROJECT",
-    "JWT_SECRET",
+    "JWT_SECRET"
   ];
 
-  const missingEnv = requiredEnv.filter(
+  const missing = required.filter(
     (name) => !process.env[name]
   );
 
-  if (missingEnv.length > 0) {
+  if (missing.length) {
     console.error(
-      "Missing required production environment variables:",
-      missingEnv.join(", ")
+      "Missing production environment variables:",
+      missing.join(", ")
     );
   }
 }
 
-// ============================================================
-// FIREBASE SERVICE ACCOUNT CONFIG
-// ============================================================
+/* ============================================================
+   FIREBASE SERVICE ACCOUNT
+============================================================ */
 
 let serviceAccount = null;
 
 try {
   if (!process.env.FIREBASE_CONFIG_JSON) {
     throw new Error(
-      "FIREBASE_CONFIG_JSON environment variable is missing"
+      "FIREBASE_CONFIG_JSON is missing"
     );
   }
 
@@ -106,7 +94,9 @@ try {
 
   if (serviceAccount.private_key) {
     serviceAccount.private_key =
-      serviceAccount.private_key.replace(/\\n/g, "\n");
+      String(serviceAccount.private_key)
+        .replace(/\\n/g, "\n")
+        .replace(/\r\n/g, "\n");
   }
 
   if (
@@ -115,7 +105,7 @@ try {
     !serviceAccount.private_key
   ) {
     throw new Error(
-      "FIREBASE_CONFIG_JSON is missing project_id, client_email or private_key"
+      "FIREBASE_CONFIG_JSON must contain project_id, client_email and private_key"
     );
   }
 
@@ -130,25 +120,21 @@ try {
   );
 }
 
-// ============================================================
-// FIREBASE ADMIN INITIALIZATION
-// ============================================================
+/* ============================================================
+   FIREBASE ADMIN
+============================================================ */
 
 let firebaseApp = null;
 let db = null;
 let auth = null;
 
 try {
-  if (!admin.apps.length && serviceAccount) {
+  if (serviceAccount) {
     firebaseApp = admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
-      storageBucket: GCS_BUCKET_NAME,
+      storageBucket: GCS_BUCKET_NAME
     });
-  } else if (admin.apps.length) {
-    firebaseApp = admin.app();
-  }
 
-  if (firebaseApp) {
     db = admin.firestore();
     auth = admin.auth();
 
@@ -163,9 +149,9 @@ try {
   );
 }
 
-// ============================================================
-// GOOGLE CLOUD STORAGE INITIALIZATION
-// ============================================================
+/* ============================================================
+   GOOGLE CLOUD STORAGE
+============================================================ */
 
 let storage = null;
 let bucket = null;
@@ -173,14 +159,23 @@ let bucket = null;
 try {
   if (serviceAccount) {
     storage = new Storage({
-      projectId: serviceAccount.project_id || PROJECT_ID,
+      projectId:
+        serviceAccount.project_id ||
+        PROJECT_ID,
+
       credentials: {
-        client_email: serviceAccount.client_email,
-        private_key: serviceAccount.private_key,
-      },
+        client_email:
+          serviceAccount.client_email,
+
+        private_key:
+          serviceAccount.private_key
+      }
     });
 
-    bucket = storage.bucket(GCS_BUCKET_NAME);
+    bucket =
+      storage.bucket(
+        GCS_BUCKET_NAME
+      );
 
     console.log(
       "Google Cloud Storage initialized:",
@@ -194,54 +189,64 @@ try {
   );
 }
 
-// ============================================================
-// EXPRESS MIDDLEWARE
-// ============================================================
+/* ============================================================
+   EXPRESS
+============================================================ */
 
 app.use(cors());
 
-app.use(morgan("combined"));
+app.use(
+  morgan("combined")
+);
 
 /*
- * IMPORTANT:
- * rawBody is preserved because Razorpay webhook signature
- * verification requires the exact raw request body.
+ * Keep exact raw request body for Razorpay webhook.
  */
 app.use(
   express.json({
     limit: "25mb",
 
     verify: (req, res, buf) => {
-      req.rawBody = Buffer.from(buf);
-    },
+      req.rawBody =
+        Buffer.from(buf);
+    }
   })
 );
 
 app.use(
   express.urlencoded({
     extended: true,
-    limit: "25mb",
+    limit: "25mb"
   })
 );
 
-// ============================================================
-// BASIC HELPERS
-// ============================================================
+/* ============================================================
+   BASIC HELPERS
+============================================================ */
 
 function isFirebaseReady() {
-  return !!db && !!auth && !!firebaseApp;
+  return Boolean(
+    firebaseApp &&
+    db &&
+    auth
+  );
 }
 
 function isStorageReady() {
-  return !!storage && !!bucket;
+  return Boolean(
+    storage &&
+    bucket
+  );
 }
 
 function requireFirebaseReady(res) {
   if (!isFirebaseReady()) {
     res.status(503).json({
-      error: "FIREBASE_NOT_CONFIGURED",
+      error:
+        "FIREBASE_NOT_CONFIGURED",
+
       message:
-        "Firebase Admin is not initialized on the backend.",
+        "Firebase Admin is not initialized on the backend."
     });
 
     return false;
@@ -253,9 +258,11 @@ function requireFirebaseReady(res) {
 function requireStorageReady(res) {
   if (!isStorageReady()) {
     res.status(503).json({
-      error: "STORAGE_NOT_CONFIGURED",
+      error:
+        "STORAGE_NOT_CONFIGURED",
+
       message:
-        "Google Cloud Storage is not initialized on the backend.",
+        "Google Cloud Storage is not initialized on the backend."
     });
 
     return false;
@@ -265,18 +272,37 @@ function requireStorageReady(res) {
 }
 
 function getBearerToken(req) {
-  const header = req.headers.authorization || "";
+  const header =
+    req.headers.authorization || "";
 
   if (!header.startsWith("Bearer ")) {
     return null;
   }
 
-  return header.substring(7).trim() || null;
+  return header
+    .substring(7)
+    .trim() || null;
 }
 
-// ============================================================
-// FIREBASE AUTH MIDDLEWARE
-// ============================================================
+function cleanMovieId(value) {
+  return String(value || "")
+    .replace(
+      /[^a-zA-Z0-9_-]/g,
+      ""
+    );
+}
+
+function cleanFileName(value) {
+  return String(value || "")
+    .replace(
+      /[^a-zA-Z0-9._-]/g,
+      "_"
+    );
+}
+
+/* ============================================================
+   FIREBASE AUTH
+============================================================ */
 
 async function authenticateFirebaseUser(
   req,
@@ -288,21 +314,30 @@ async function authenticateFirebaseUser(
       return;
     }
 
-    const token = getBearerToken(req);
+    const token =
+      getBearerToken(req);
 
     if (!token) {
       return res.status(401).json({
-        error: "AUTH_REQUIRED",
-        message: "Firebase ID token is required.",
+        error:
+          "AUTH_REQUIRED",
+
+        message:
+          "Firebase ID token is required."
       });
     }
 
-    const decodedToken =
-      await auth.verifyIdToken(token, true);
+    const decoded =
+      await auth.verifyIdToken(
+        token,
+        true
+      );
 
-    req.firebaseUser = decodedToken;
+    req.firebaseUser =
+      decoded;
 
-    req.uid = decodedToken.uid;
+    req.uid =
+      decoded.uid;
 
     next();
   } catch (error) {
@@ -312,26 +347,31 @@ async function authenticateFirebaseUser(
     );
 
     return res.status(401).json({
-      error: "AUTH_INVALID",
+      error:
+        "AUTH_INVALID",
+
       message:
-        "Your login session is invalid or expired. Please sign in again.",
+        "Your login session is invalid or expired. Please sign in again."
     });
   }
 }
 
-// ============================================================
-// FIRESTORE USER DOCUMENT
-// ============================================================
+/* ============================================================
+   USER DOCUMENT
+============================================================ */
 
 async function getUserDocument(uid) {
   if (!db) {
-    throw new Error("Firestore is not initialized");
+    throw new Error(
+      "Firestore is not initialized"
+    );
   }
 
-  const snap = await db
-    .collection("users")
-    .doc(uid)
-    .get();
+  const snap =
+    await db
+      .collection("users")
+      .doc(uid)
+      .get();
 
   if (!snap.exists) {
     return null;
@@ -339,13 +379,13 @@ async function getUserDocument(uid) {
 
   return {
     id: snap.id,
-    ...snap.data(),
+    ...snap.data()
   };
 }
 
-// ============================================================
-// ADMIN AUTHORIZATION
-// ============================================================
+/* ============================================================
+   ADMIN AUTH
+============================================================ */
 
 async function requireAdmin(
   req,
@@ -353,60 +393,69 @@ async function requireAdmin(
   next
 ) {
   try {
-    if (!requireFirebaseReady(res)) {
-      return;
-    }
-
     if (!req.uid) {
       return res.status(401).json({
-        error: "AUTH_REQUIRED",
-        message: "Authentication required.",
-      });
-    }
+        error:
+          "AUTH_REQUIRED",
 
-    const userDoc =
-      await getUserDocument(req.uid);
-
-    if (!userDoc) {
-      return res.status(403).json({
-        error: "USER_PROFILE_NOT_FOUND",
         message:
-          "User profile was not found.",
+          "Authentication required."
       });
     }
 
-    const role = String(
-      userDoc.role || ""
-    ).toUpperCase();
+    const user =
+      await getUserDocument(
+        req.uid
+      );
+
+    if (!user) {
+      return res.status(403).json({
+        error:
+          "USER_PROFILE_NOT_FOUND",
+
+        message:
+          "User profile was not found."
+      });
+    }
+
+    const role =
+      String(
+        user.role || ""
+      ).toUpperCase();
 
     if (role !== "ADMIN") {
       return res.status(403).json({
-        error: "ADMIN_REQUIRED",
+        error:
+          "ADMIN_REQUIRED",
+
         message:
-          "Administrator access is required.",
+          "Administrator access is required."
       });
     }
 
-    req.userDocument = userDoc;
+    req.userDocument =
+      user;
 
     next();
   } catch (error) {
     console.error(
       "Admin authorization failed:",
-      error.message
+      error
     );
 
     return res.status(500).json({
-      error: "ADMIN_AUTHORIZATION_FAILED",
+      error:
+        "ADMIN_AUTHORIZATION_FAILED",
+
       message:
-        "Unable to verify administrator access.",
+        "Unable to verify administrator access."
     });
   }
 }
 
-// ============================================================
-// USER ACCESS
-// ============================================================
+/* ============================================================
+   USER AUTH
+============================================================ */
 
 async function requireUser(
   req,
@@ -414,81 +463,92 @@ async function requireUser(
   next
 ) {
   try {
-    if (!req.uid) {
-      return res.status(401).json({
-        error: "AUTH_REQUIRED",
-        message: "Authentication required.",
-      });
-    }
+    const user =
+      await getUserDocument(
+        req.uid
+      );
 
-    const userDoc =
-      await getUserDocument(req.uid);
-
-    if (!userDoc) {
+    if (!user) {
       return res.status(404).json({
-        error: "USER_NOT_FOUND",
+        error:
+          "USER_NOT_FOUND",
+
         message:
-          "User profile was not found.",
+          "User profile was not found."
       });
     }
 
-    req.userDocument = userDoc;
+    req.userDocument =
+      user;
 
     next();
   } catch (error) {
     console.error(
       "User authorization failed:",
-      error.message
+      error
     );
 
     return res.status(500).json({
-      error: "USER_AUTHORIZATION_FAILED",
+      error:
+        "USER_AUTHORIZATION_FAILED",
+
       message:
-        "Unable to verify user access.",
+        "Unable to verify user access."
     });
   }
 }
 
-// ============================================================
-// HEALTH CHECK
-// ============================================================
+/* ============================================================
+   HEALTH
+============================================================ */
 
 app.get(
   "/health",
-  async (req, res) => {
-    const firebaseReady =
-      isFirebaseReady();
-
-    const storageReady =
-      isStorageReady();
-
-    return res.status(200).json({
+  (req, res) => {
+    res.status(200).json({
       ok: true,
-      service: "cine-nova-backend",
-      projectId: PROJECT_ID,
-      firebase: firebaseReady,
-      storage: storageReady,
-      bucket: GCS_BUCKET_NAME,
-      timestamp: new Date().toISOString(),
+
+      service:
+        "cine-nova-backend",
+
+      projectId:
+        PROJECT_ID,
+
+      firebase:
+        isFirebaseReady(),
+
+      storage:
+        isStorageReady(),
+
+      bucket:
+        GCS_BUCKET_NAME,
+
+      timestamp:
+        new Date().toISOString()
     });
   }
 );
 
-// ============================================================
-// ROOT
-// ============================================================
+/* ============================================================
+   ROOT
+============================================================ */
 
-app.get("/", (req, res) => {
-  res.status(404).json({
-    error: "NOT_FOUND",
-    message:
-      "CineNova backend is running. Use /health for health status.",
-  });
-});
+app.get(
+  "/",
+  (req, res) => {
+    res.status(404).json({
+      error:
+        "NOT_FOUND",
 
-// ============================================================
-// DIAGNOSTICS
-// ============================================================
+      message:
+        "CineNova backend is running. Use /health for health status."
+    });
+  }
+);
+
+/* ============================================================
+   DIAGNOSTICS
+============================================================ */
 
 app.get(
   "/diagnostics",
@@ -497,7 +557,10 @@ app.get(
     let user = null;
 
     try {
-      user = await getUserDocument(req.uid);
+      user =
+        await getUserDocument(
+          req.uid
+        );
     } catch (error) {
       console.error(
         "Diagnostics user lookup failed:",
@@ -505,34 +568,44 @@ app.get(
       );
     }
 
-    return res.status(200).json({
+    res.status(200).json({
       ok: true,
-      uid: req.uid,
+
+      uid:
+        req.uid,
+
       firebaseProject:
         serviceAccount?.project_id ||
         PROJECT_ID,
+
       firebaseAdmin:
         isFirebaseReady(),
+
       storage:
         isStorageReady(),
+
       bucket:
         GCS_BUCKET_NAME,
+
       role:
         user?.role || null,
+
       timestamp:
-        new Date().toISOString(),
+        new Date().toISOString()
     });
   }
 );
 
-// ============================================================
-// ADMIN - CREATE GCS RESUMABLE UPLOAD SESSION
-// ============================================================
+/* ============================================================
+   ADMIN - CREATE GCS UPLOAD SESSION
+============================================================ */
 
 app.post(
   "/admin/movies/create-upload-session",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
       if (!requireStorageReady(res)) {
@@ -543,45 +616,61 @@ app.post(
         movieId,
         fileName,
         contentType,
-        fileSize,
+        fileSize
       } = req.body || {};
 
       if (!movieId) {
         return res.status(400).json({
-          error: "MOVIE_ID_REQUIRED",
+          error:
+            "MOVIE_ID_REQUIRED",
+
           message:
-            "movieId is required.",
+            "movieId is required."
         });
       }
 
       if (!fileName) {
         return res.status(400).json({
-          error: "FILE_NAME_REQUIRED",
+          error:
+            "FILE_NAME_REQUIRED",
+
           message:
-            "fileName is required.",
+            "fileName is required."
         });
       }
 
       const safeMovieId =
-        String(movieId)
-          .replace(/[^a-zA-Z0-9_-]/g, "");
+        cleanMovieId(
+          movieId
+        );
 
       const safeFileName =
-        String(fileName)
-          .replace(/[^a-zA-Z0-9._-]/g, "_");
+        cleanFileName(
+          fileName
+        );
+
+      if (!safeMovieId) {
+        return res.status(400).json({
+          error:
+            "INVALID_MOVIE_ID",
+
+          message:
+            "Invalid movieId."
+        });
+      }
 
       const objectPath =
         `movies/${safeMovieId}/video/original/${safeFileName}`;
 
       const file =
-        bucket.file(objectPath);
+        bucket.file(
+          objectPath
+        );
 
       /*
-       * GCS resumable upload session.
-       *
-       * The client uploads directly to GCS.
-       * The full video does NOT pass through the Android phone
-       * and does NOT need to be stored permanently on the phone.
+       * IMPORTANT:
+       * Do NOT send an Android origin here.
+       * GCS creates the resumable session itself.
        */
       const [uploadUrl] =
         await file.createResumableUpload({
@@ -603,20 +692,23 @@ app.post(
               cineNovaFileSize:
                 fileSize
                   ? String(fileSize)
-                  : "",
-            },
-          },
-
-          origin:
-            PUBLIC_BASE_URL || undefined,
+                  : ""
+            }
+          }
         });
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
-        movieId: safeMovieId,
+
+        movieId:
+          safeMovieId,
+
         objectPath,
+
         uploadUrl,
-        storageProvider: "GCS_PRIVATE",
+
+        storageProvider:
+          "GCS_PRIVATE"
       });
     } catch (error) {
       console.error(
@@ -624,118 +716,130 @@ app.post(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "UPLOAD_SESSION_CREATION_FAILED",
+
         message:
           error.message ||
-          "Unable to create cloud storage upload session.",
+          "Unable to create cloud storage upload session."
       });
     }
   }
 );
 
-// ============================================================
-// ADMIN - CREATE MOVIE DOCUMENT
-// ============================================================
+/* ============================================================
+   ADMIN - CREATE MOVIE
+============================================================ */
 
 app.post(
   "/admin/movies",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
       if (!requireFirebaseReady(res)) {
         return;
       }
 
-      const {
-        title,
-        description,
-        genre,
-        language,
-        year,
-        duration,
-        rating,
-        maturity,
-        quality,
-        featured,
-        published,
-        videoObjectPath,
-        posterObjectPath,
-        bannerObjectPath,
-      } = req.body || {};
+      const body =
+        req.body || {};
+
+      const title =
+        String(
+          body.title || ""
+        ).trim();
 
       if (!title) {
         return res.status(400).json({
-          error: "TITLE_REQUIRED",
+          error:
+            "TITLE_REQUIRED",
+
           message:
-            "Movie title is required.",
+            "Movie title is required."
         });
       }
 
       const movieRef =
-        db.collection("movies").doc();
+        db
+          .collection("movies")
+          .doc();
 
       const movie = {
-        movieId: movieRef.id,
+        movieId:
+          movieRef.id,
 
-        title:
-          String(title).trim(),
+        title,
 
         description:
-          String(description || "").trim(),
+          String(
+            body.description || ""
+          ).trim(),
 
         genre:
-          String(genre || "").trim(),
+          String(
+            body.genre || ""
+          ).trim(),
 
         language:
-          String(language || "").trim(),
+          String(
+            body.language || ""
+          ).trim(),
 
         year:
-          year !== undefined &&
-          year !== null
-            ? Number(year)
+          body.year != null
+            ? Number(body.year)
             : null,
 
         duration:
-          duration !== undefined &&
-          duration !== null
-            ? Number(duration)
+          body.duration != null
+            ? Number(body.duration)
             : null,
 
         rating:
-          rating !== undefined &&
-          rating !== null
-            ? Number(rating)
+          body.rating != null
+            ? Number(body.rating)
             : null,
 
         maturity:
-          String(maturity || "").trim(),
+          String(
+            body.maturity || ""
+          ).trim(),
 
         quality:
-          String(quality || "").trim(),
+          String(
+            body.quality || ""
+          ).trim(),
 
         featured:
-          Boolean(featured),
+          Boolean(
+            body.featured
+          ),
 
         published:
-          Boolean(published),
+          Boolean(
+            body.published
+          ),
 
         videoObjectPath:
-          videoObjectPath ||
+          body.videoObjectPath ||
           null,
 
         posterObjectPath:
-          posterObjectPath ||
+          body.posterObjectPath ||
           null,
 
         bannerObjectPath:
-          bannerObjectPath ||
+          body.bannerObjectPath ||
           null,
 
         storageProvider:
           "GCS_PRIVATE",
+
+        importStatus:
+          "DRAFT",
 
         createdBy:
           req.uid,
@@ -744,15 +848,20 @@ app.post(
           admin.firestore.FieldValue.serverTimestamp(),
 
         updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
+          admin.firestore.FieldValue.serverTimestamp()
       };
 
-      await movieRef.set(movie);
+      await movieRef.set(
+        movie
+      );
 
-      return res.status(201).json({
+      res.status(201).json({
         success: true,
-        movieId: movieRef.id,
-        movie,
+
+        movieId:
+          movieRef.id,
+
+        movie
       });
     } catch (error) {
       console.error(
@@ -760,24 +869,28 @@ app.post(
         error
       );
 
-      return res.status(500).json({
-        error: "MOVIE_CREATE_FAILED",
+      res.status(500).json({
+        error:
+          "MOVIE_CREATE_FAILED",
+
         message:
           error.message ||
-          "Unable to create movie.",
+          "Unable to create movie."
       });
     }
   }
 );
 
-// ============================================================
-// ADMIN - FINALIZE UPLOAD
-// ============================================================
+/* ============================================================
+   ADMIN - FINALIZE UPLOAD
+============================================================ */
 
 app.post(
   "/admin/movies/finalize-upload",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
       if (!requireFirebaseReady(res)) {
@@ -792,79 +905,79 @@ app.post(
         movieId,
         videoObjectPath,
         posterObjectPath,
-        bannerObjectPath,
+        bannerObjectPath
       } = req.body || {};
 
       if (!movieId) {
         return res.status(400).json({
-          error: "MOVIE_ID_REQUIRED",
+          error:
+            "MOVIE_ID_REQUIRED",
+
           message:
-            "movieId is required.",
+            "movieId is required."
         });
       }
 
       const movieRef =
-        db.collection("movies").doc(movieId);
+        db
+          .collection("movies")
+          .doc(
+            String(movieId)
+          );
 
       const movieSnap =
         await movieRef.get();
 
       if (!movieSnap.exists) {
         return res.status(404).json({
-          error: "MOVIE_NOT_FOUND",
+          error:
+            "MOVIE_NOT_FOUND",
+
           message:
-            "Movie document was not found.",
+            "Movie document was not found."
         });
       }
 
       const updates = {
-        updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-
         storageProvider:
           "GCS_PRIVATE",
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
       };
 
       if (videoObjectPath) {
-        updates.videoObjectPath =
-          String(videoObjectPath);
-      }
+        const path =
+          String(
+            videoObjectPath
+          );
 
-      if (posterObjectPath) {
-        updates.posterObjectPath =
-          String(posterObjectPath);
-      }
-
-      if (bannerObjectPath) {
-        updates.bannerObjectPath =
-          String(bannerObjectPath);
-      }
-
-      /*
-       * Verify the video object exists before declaring
-       * the upload complete.
-       */
-      if (videoObjectPath) {
-        const videoFile =
-          bucket.file(videoObjectPath);
+        const file =
+          bucket.file(path);
 
         const [exists] =
-          await videoFile.exists();
+          await file.exists();
 
         if (!exists) {
           return res.status(400).json({
             error:
               "VIDEO_OBJECT_NOT_FOUND",
+
             message:
-              "The uploaded video was not found in private cloud storage.",
+              "Uploaded video was not found in private cloud storage."
           });
         }
 
         const [metadata] =
-          await videoFile.getMetadata();
+          await file.getMetadata();
+
+        updates.videoObjectPath =
+          path;
 
         updates.assetSize =
-          Number(metadata.size || 0);
+          Number(
+            metadata.size || 0
+          );
 
         updates.contentType =
           metadata.contentType ||
@@ -874,16 +987,34 @@ app.post(
           "COMPLETED";
       }
 
-      await movieRef.update(updates);
+      if (posterObjectPath) {
+        updates.posterObjectPath =
+          String(
+            posterObjectPath
+          );
+      }
+
+      if (bannerObjectPath) {
+        updates.bannerObjectPath =
+          String(
+            bannerObjectPath
+          );
+      }
+
+      await movieRef.update(
+        updates
+      );
 
       const finalSnap =
         await movieRef.get();
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
+
         movieId,
+
         movie:
-          finalSnap.data(),
+          finalSnap.data()
       });
     } catch (error) {
       console.error(
@@ -891,35 +1022,21 @@ app.post(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "UPLOAD_FINALIZATION_FAILED",
+
         message:
           error.message ||
-          "Unable to finalize upload.",
+          "Unable to finalize upload."
       });
     }
   }
 );
 
-// ============================================================
-// END OF PART 1
-// ============================================================
-
-// PART 2 continues from here.
-// Do NOT create another server.js file.
-// Paste PART 2 directly below this code.
-// ============================================================
-// CINENOVA BACKEND - server.js
-// PART 2/3
-// Google Drive Import + Movie Management
-// + Secure Streaming + Playback Sessions
-// ============================================================
-
-
-// ============================================================
-// GOOGLE DRIVE - SERVER AUTH CODE EXCHANGE
-// ============================================================
+/* ============================================================
+   GOOGLE DRIVE AUTH CODE EXCHANGE
+============================================================ */
 
 async function exchangeGoogleServerAuthCode(
   serverAuthCode
@@ -942,15 +1059,16 @@ async function exchangeGoogleServerAuthCode(
     );
   }
 
-  const tokenResponse =
+  const response =
     await fetch(
       "https://oauth2.googleapis.com/token",
       {
-        method: "POST",
+        method:
+          "POST",
 
         headers: {
           "Content-Type":
-            "application/x-www-form-urlencoded",
+            "application/x-www-form-urlencoded"
         },
 
         body:
@@ -965,35 +1083,30 @@ async function exchangeGoogleServerAuthCode(
               GOOGLE_WEB_CLIENT_SECRET,
 
             grant_type:
-              "authorization_code",
-          }).toString(),
+              "authorization_code"
+          }).toString()
       }
     );
 
-  const tokenText =
-    await tokenResponse.text();
+  const text =
+    await response.text();
 
-  let tokenData;
+  let data;
 
   try {
-    tokenData =
-      JSON.parse(tokenText);
+    data =
+      JSON.parse(text);
   } catch {
-    tokenData = {
-      raw: tokenText,
+    data = {
+      raw: text
     };
   }
 
-  if (!tokenResponse.ok) {
-    console.error(
-      "Google OAuth token exchange failed:",
-      tokenData
-    );
-
+  if (!response.ok) {
     const error =
       new Error(
-        tokenData.error_description ||
-        tokenData.error ||
+        data.error_description ||
+        data.error ||
         "Google OAuth token exchange failed"
       );
 
@@ -1003,24 +1116,25 @@ async function exchangeGoogleServerAuthCode(
     throw error;
   }
 
-  if (!tokenData.access_token) {
+  if (!data.access_token) {
     throw new Error(
       "Google OAuth exchange returned no access token"
     );
   }
 
-  return tokenData;
+  return data;
 }
 
-
-// ============================================================
-// GOOGLE DRIVE - IMPORT MOVIE DIRECTLY TO GCS
-// ============================================================
+/* ============================================================
+   GOOGLE DRIVE IMPORT
+============================================================ */
 
 app.post(
   "/admin/movies/import-from-drive",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
       if (!requireFirebaseReady(res)) {
@@ -1036,15 +1150,16 @@ app.post(
         serverAuthCode,
         driveFileId,
         fileName,
-        contentType,
+        contentType
       } = req.body || {};
 
       if (!movieId) {
         return res.status(400).json({
           error:
             "MOVIE_ID_REQUIRED",
+
           message:
-            "movieId is required.",
+            "movieId is required."
         });
       }
 
@@ -1052,8 +1167,9 @@ app.post(
         return res.status(400).json({
           error:
             "DRIVE_FILE_ID_REQUIRED",
+
           message:
-            "Google Drive file ID is required.",
+            "Google Drive file ID is required."
         });
       }
 
@@ -1064,20 +1180,15 @@ app.post(
         return res.status(400).json({
           error:
             "SERVER_AUTH_CODE_REQUIRED",
+
           message:
-            "Google Drive server authorization code is required.",
+            "Google Drive server authorization code is required."
         });
       }
 
-      let accessToken = null;
+      let accessToken =
+        null;
 
-      /*
-       * Production path:
-       * Android sends a one-time serverAuthCode.
-       *
-       * Backend exchanges it using the Web OAuth client
-       * secret. The secret NEVER goes inside the APK.
-       */
       if (serverAuthCode) {
         try {
           const tokenData =
@@ -1087,77 +1198,56 @@ app.post(
 
           accessToken =
             tokenData.access_token;
-        } catch (oauthError) {
+        } catch (error) {
           console.error(
             "Google OAuth exchange error:",
-            oauthError.message
+            error.message
           );
 
           return res.status(400).json({
             error:
               "OAUTH_EXCHANGE_FAILED",
+
             message:
-              oauthError.message ||
-              "Google Drive authorization could not be completed.",
+              error.message
           });
         }
       }
 
-      /*
-       * Legacy token path is intentionally disabled in production
-       * unless explicitly enabled.
-       */
       if (
         !accessToken &&
         ALLOW_LEGACY_DRIVE_TOKEN
       ) {
         accessToken =
-          req.body.accessToken || null;
+          req.body.accessToken ||
+          null;
       }
 
       if (!accessToken) {
         return res.status(400).json({
           error:
             "DRIVE_AUTH_FAILED",
+
           message:
-            "A valid Google Drive authorization token is required.",
+            "A valid Google Drive authorization token is required."
         });
       }
 
-      const drive =
-        google.drive({
-          version: "v3",
-
-          auth: new google.auth.OAuth2(
-            GOOGLE_WEB_CLIENT_ID ||
-              undefined
-          ),
-        });
-
-      drive.options = {
-        ...drive.options,
-
-        headers: {
-          Authorization:
-            `Bearer ${accessToken}`,
-        },
+      const authHeader = {
+        Authorization:
+          `Bearer ${accessToken}`
       };
 
-      /*
-       * Read-only metadata request.
-       */
+      /* ---- Drive metadata ---- */
+
       const metadataResponse =
         await fetch(
           `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
             driveFileId
           )}?fields=id,name,mimeType,size,trashed&supportsAllDrives=true`,
           {
-            method: "GET",
-
-            headers: {
-              Authorization:
-                `Bearer ${accessToken}`,
-            },
+            headers:
+              authHeader
           }
         );
 
@@ -1168,23 +1258,21 @@ app.post(
 
       try {
         driveMetadata =
-          JSON.parse(metadataText);
+          JSON.parse(
+            metadataText
+          );
       } catch {
         driveMetadata = null;
       }
 
       if (!metadataResponse.ok) {
-        console.error(
-          "Google Drive metadata failed:",
-          metadataText
-        );
-
         return res.status(400).json({
           error:
             "DRIVE_METADATA_FAILED",
+
           message:
             driveMetadata?.error?.message ||
-            "Unable to read the selected Google Drive file.",
+            "Unable to read the selected Google Drive file."
         });
       }
 
@@ -1192,14 +1280,12 @@ app.post(
         return res.status(400).json({
           error:
             "DRIVE_FILE_TRASHED",
+
           message:
-            "The selected Google Drive file is in trash.",
+            "The selected Google Drive file is in trash."
         });
       }
 
-      /*
-       * Only video files are accepted by this endpoint.
-       */
       const mime =
         String(
           driveMetadata.mimeType ||
@@ -1211,102 +1297,104 @@ app.post(
         return res.status(400).json({
           error:
             "INVALID_DRIVE_FILE_TYPE",
+
           message:
-            "The selected Google Drive file is not a video.",
+            "The selected Google Drive file is not a video."
         });
       }
 
       const safeMovieId =
-        String(movieId)
-          .replace(
-            /[^a-zA-Z0-9_-]/g,
-            ""
-          );
-
-      const originalName =
-        fileName ||
-        driveMetadata.name ||
-        "movie.mp4";
+        cleanMovieId(
+          movieId
+        );
 
       const safeFileName =
-        String(originalName)
-          .replace(
-            /[^a-zA-Z0-9._-]/g,
-            "_"
-          );
+        cleanFileName(
+          fileName ||
+          driveMetadata.name ||
+          "movie.mp4"
+        );
 
       const objectPath =
         `movies/${safeMovieId}/video/original/${safeFileName}`;
 
-      const destinationFile =
-        bucket.file(objectPath);
+      const movieRef =
+        db
+          .collection("movies")
+          .doc(
+            safeMovieId
+          );
 
-      /*
-       * Cloud-to-cloud transfer:
-       *
-       * Google Drive -> backend stream -> private GCS
-       *
-       * The complete movie is NOT downloaded to the
-       * administrator's Android device.
-       */
-      const driveResponse =
+      const movieSnap =
+        await movieRef.get();
+
+      if (!movieSnap.exists) {
+        return res.status(404).json({
+          error:
+            "MOVIE_NOT_FOUND",
+
+          message:
+            "Movie document was not found."
+        });
+      }
+
+      /* ---- Drive media stream ---- */
+
+      const mediaResponse =
         await fetch(
           `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
             driveFileId
           )}?alt=media&supportsAllDrives=true`,
           {
-            method: "GET",
-
-            headers: {
-              Authorization:
-                `Bearer ${accessToken}`,
-            },
+            headers:
+              authHeader
           }
         );
 
-      if (!driveResponse.ok) {
+      if (!mediaResponse.ok) {
         const errorText =
-          await driveResponse.text();
+          await mediaResponse.text();
 
         console.error(
-          "Google Drive media download failed:",
+          "Drive media error:",
           errorText
         );
 
         return res.status(400).json({
           error:
             "DRIVE_MEDIA_DOWNLOAD_FAILED",
+
           message:
-            "Unable to read video data from Google Drive.",
+            "Unable to read video data from Google Drive."
         });
       }
 
-      if (!driveResponse.body) {
+      if (!mediaResponse.body) {
         return res.status(400).json({
           error:
             "DRIVE_EMPTY_RESPONSE",
+
           message:
-            "Google Drive returned no video stream.",
+            "Google Drive returned no video stream."
         });
       }
 
-      /*
-       * Node fetch returns a Web ReadableStream.
-       * Convert it to a Node stream for GCS.
-       */
-      const { Readable } =
-        require("stream");
-
       const nodeStream =
         Readable.fromWeb(
-          driveResponse.body
+          mediaResponse.body
+        );
+
+      const destinationFile =
+        bucket.file(
+          objectPath
         );
 
       await new Promise(
         (resolve, reject) => {
           const writeStream =
             destinationFile.createWriteStream({
-              resumable: true,
+              resumable:
+                true,
 
               metadata: {
                 contentType:
@@ -1318,15 +1406,17 @@ app.post(
                     safeMovieId,
 
                   driveVideoFileId:
-                    String(driveFileId),
+                    String(
+                      driveFileId
+                    ),
 
                   importedBy:
                     req.uid,
 
                   storageProvider:
-                    "GCS_PRIVATE",
-                },
-              },
+                    "GCS_PRIVATE"
+                }
+              }
             });
 
           nodeStream.on(
@@ -1353,25 +1443,11 @@ app.post(
       const [gcsMetadata] =
         await destinationFile.getMetadata();
 
-      const movieRef =
-        db.collection("movies")
-          .doc(safeMovieId);
-
-      const movieSnap =
-        await movieRef.get();
-
-      if (!movieSnap.exists) {
-        return res.status(404).json({
-          error:
-            "MOVIE_NOT_FOUND",
-          message:
-            "Movie document was not found.",
-        });
-      }
-
       await movieRef.update({
         driveVideoFileId:
-          String(driveFileId),
+          String(
+            driveFileId
+          ),
 
         videoObjectPath:
           objectPath,
@@ -1393,17 +1469,19 @@ app.post(
           "COMPLETED",
 
         updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
+          admin.firestore.FieldValue.serverTimestamp()
       });
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
 
         movieId:
           safeMovieId,
 
         driveVideoFileId:
-          String(driveFileId),
+          String(
+            driveFileId
+          ),
 
         videoObjectPath:
           objectPath,
@@ -1417,7 +1495,7 @@ app.post(
           "GCS_PRIVATE",
 
         importStatus:
-          "COMPLETED",
+          "COMPLETED"
       });
     } catch (error) {
       console.error(
@@ -1425,32 +1503,30 @@ app.post(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "DRIVE_IMPORT_FAILED",
+
         message:
           error.message ||
-          "Google Drive import failed.",
+          "Google Drive import failed."
       });
     }
   }
 );
 
-
-// ============================================================
-// ADMIN - LIST MOVIES
-// ============================================================
+/* ============================================================
+   ADMIN - LIST MOVIES
+============================================================ */
 
 app.get(
   "/admin/movies",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
       const snapshot =
         await db
           .collection("movies")
@@ -1465,13 +1541,14 @@ app.get(
           (doc) => ({
             movieId:
               doc.id,
-            ...doc.data(),
+
+            ...doc.data()
           })
         );
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
-        movies,
+        movies
       });
     } catch (error) {
       console.error(
@@ -1479,60 +1556,59 @@ app.get(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "MOVIE_LIST_FAILED",
+
         message:
           error.message ||
-          "Unable to load movies.",
+          "Unable to load movies."
       });
     }
   }
 );
 
-
-// ============================================================
-// ADMIN - GET MOVIE DETAILS
-// ============================================================
+/* ============================================================
+   ADMIN - GET MOVIE
+============================================================ */
 
 app.get(
   "/admin/movies/:movieId",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      const movieId =
-        String(
-          req.params.movieId
-        );
-
       const snap =
         await db
           .collection("movies")
-          .doc(movieId)
+          .doc(
+            String(
+              req.params.movieId
+            )
+          )
           .get();
 
       if (!snap.exists) {
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
 
         movie: {
           movieId:
             snap.id,
-          ...snap.data(),
-        },
+
+          ...snap.data()
+        }
       });
     } catch (error) {
       console.error(
@@ -1540,40 +1616,38 @@ app.get(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "MOVIE_DETAILS_FAILED",
+
         message:
           error.message ||
-          "Unable to load movie details.",
+          "Unable to load movie details."
       });
     }
   }
 );
 
-
-// ============================================================
-// ADMIN - UPDATE MOVIE
-// ============================================================
+/* ============================================================
+   ADMIN - UPDATE MOVIE
+============================================================ */
 
 app.patch(
   "/admin/movies/:movieId",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      const movieId =
-        String(
-          req.params.movieId
-        );
-
       const movieRef =
-        db.collection("movies")
-          .doc(movieId);
+        db
+          .collection("movies")
+          .doc(
+            String(
+              req.params.movieId
+            )
+          );
 
       const movieSnap =
         await movieRef.get();
@@ -1582,12 +1656,13 @@ app.patch(
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
-      const allowedFields = [
+      const allowed = [
         "title",
         "description",
         "genre",
@@ -1600,14 +1675,12 @@ app.patch(
         "featured",
         "published",
         "posterObjectPath",
-        "bannerObjectPath",
+        "bannerObjectPath"
       ];
 
       const updates = {};
 
-      for (
-        const field of allowedFields
-      ) {
+      for (const field of allowed) {
         if (
           Object.prototype.hasOwnProperty.call(
             req.body || {},
@@ -1620,13 +1693,14 @@ app.patch(
       }
 
       if (
-        Object.keys(updates).length === 0
+        !Object.keys(updates).length
       ) {
         return res.status(400).json({
           error:
             "NO_UPDATES",
+
           message:
-            "No valid movie fields were supplied.",
+            "No valid movie fields were supplied."
         });
       }
 
@@ -1640,14 +1714,15 @@ app.patch(
       const finalSnap =
         await movieRef.get();
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
 
         movie: {
           movieId:
             finalSnap.id,
-          ...finalSnap.data(),
-        },
+
+          ...finalSnap.data()
+        }
       });
     } catch (error) {
       console.error(
@@ -1655,29 +1730,139 @@ app.patch(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "MOVIE_UPDATE_FAILED",
+
         message:
           error.message ||
-          "Unable to update movie.",
+          "Unable to update movie."
       });
     }
   }
 );
 
-
-// ============================================================
-// ADMIN - DELETE MOVIE
-// ============================================================
+/* ============================================================
+   ADMIN - DELETE MOVIE
+============================================================ */
 
 app.delete(
   "/admin/movies/:movieId",
+
   authenticateFirebaseUser,
   requireAdmin,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
+      const movieId =
+        String(
+          req.params.movieId
+        );
+
+      const movieRef =
+        db
+          .collection("movies")
+          .doc(movieId);
+
+      const snap =
+        await movieRef.get();
+
+      if (!snap.exists) {
+        return res.status(404).json({
+          error:
+            "MOVIE_NOT_FOUND",
+
+          message:
+            "Movie was not found."
+        });
+      }
+
+      const movie =
+        snap.data();
+
+      if (isStorageReady()) {
+        try {
+          const [files] =
+            await bucket.getFiles({
+              prefix:
+                `movies/${movieId}/`
+            });
+
+          await Promise.all(
+            files.map(
+              (file) =>
+                file.delete({
+                  ignoreNotFound:
+                    true
+                })
+            )
+          );
+        } catch (error) {
+          console.error(
+            "Movie storage cleanup failed:",
+            error.message
+          );
+        }
+
+        for (
+          const path of [
+            movie.videoObjectPath,
+            movie.posterObjectPath,
+            movie.bannerObjectPath
+          ].filter(Boolean)
+        ) {
+          try {
+            await bucket
+              .file(path)
+              .delete({
+                ignoreNotFound:
+                  true
+              });
+          } catch {}
+        }
+      }
+
+      await movieRef.delete();
+
+      res.status(200).json({
+        success: true,
+
+        movieId,
+
+        deleted:
+          true
+      });
+    } catch (error) {
+      console.error(
+        "Movie delete failed:",
+        error
+      );
+
+      res.status(500).json({
+        error:
+          "MOVIE_DELETE_FAILED",
+
+        message:
+          error.message ||
+          "Unable to delete movie."
+      });
+    }
+  }
+);
+
+/* ============================================================
+   ADMIN - REPLACE MOVIE VIDEO
+============================================================ */
+
+app.post(
+  "/admin/movies/:movieId/replace-video",
+
+  authenticateFirebaseUser,
+  requireAdmin,
+
+  async (req, res) => {
+    try {
+      if (!requireStorageReady(res)) {
         return;
       }
 
@@ -1686,8 +1871,25 @@ app.delete(
           req.params.movieId
         );
 
+      const path =
+        String(
+          req.body?.videoObjectPath ||
+          ""
+        );
+
+      if (!path) {
+        return res.status(400).json({
+          error:
+            "VIDEO_OBJECT_PATH_REQUIRED",
+
+          message:
+            "videoObjectPath is required."
+        });
+      }
+
       const movieRef =
-        db.collection("movies")
+        db
+          .collection("movies")
           .doc(movieId);
 
       const movieSnap =
@@ -1697,156 +1899,141 @@ app.delete(
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
-      const movie =
-        movieSnap.data();
+      const file =
+        bucket.file(path);
 
-      /*
-       * Delete private GCS assets belonging to this movie.
-       */
-      if (isStorageReady()) {
-        const paths = [
-          movie.videoObjectPath,
-          movie.posterObjectPath,
-          movie.bannerObjectPath,
-        ].filter(Boolean);
+      const [exists] =
+        await file.exists();
 
-        for (
-          const objectPath of paths
-        ) {
-          try {
-            await bucket
-              .file(objectPath)
-              .delete({
-                ignoreNotFound: true,
-              });
-          } catch (storageError) {
-            console.error(
-              "Movie asset deletion failed:",
-              objectPath,
-              storageError.message
-            );
-          }
-        }
+      if (!exists) {
+        return res.status(400).json({
+          error:
+            "VIDEO_OBJECT_NOT_FOUND",
 
-        /*
-         * Also remove quality-specific objects
-         * under the movie folder.
-         */
-        try {
-          const [files] =
-            await bucket.getFiles({
-              prefix:
-                `movies/${movieId}/`,
-            });
-
-          if (files.length > 0) {
-            await Promise.all(
-              files.map(
-                (file) =>
-                  file.delete({
-                    ignoreNotFound:
-                      true,
-                  })
-              )
-            );
-          }
-        } catch (storageError) {
-          console.error(
-            "Movie folder cleanup failed:",
-            storageError.message
-          );
-        }
+          message:
+            "Replacement video was not found."
+        });
       }
 
-      await movieRef.delete();
+      const [metadata] =
+        await file.getMetadata();
 
-      return res.status(200).json({
+      await movieRef.update({
+        videoObjectPath:
+          path,
+
+        assetSize:
+          Number(
+            metadata.size || 0
+          ),
+
+        contentType:
+          metadata.contentType ||
+          "video/mp4",
+
+        storageProvider:
+          "GCS_PRIVATE",
+
+        importStatus:
+          "COMPLETED",
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      res.status(200).json({
         success: true,
+
         movieId,
-        deleted: true,
+
+        videoObjectPath:
+          path,
+
+        assetSize:
+          Number(
+            metadata.size || 0
+          )
       });
     } catch (error) {
       console.error(
-        "Movie delete failed:",
+        "Replace video failed:",
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
-          "MOVIE_DELETE_FAILED",
+          "REPLACE_VIDEO_FAILED",
+
         message:
           error.message ||
-          "Unable to delete movie.",
+          "Unable to replace movie video."
       });
     }
   }
 );
 
-
-// ============================================================
-// USER - GET MOVIE
-// ============================================================
+/* ============================================================
+   USER - GET MOVIE
+============================================================ */
 
 app.get(
   "/movies/:movieId",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      const movieId =
-        String(
-          req.params.movieId
-        );
-
       const snap =
         await db
           .collection("movies")
-          .doc(movieId)
+          .doc(
+            String(
+              req.params.movieId
+            )
+          )
           .get();
 
       if (!snap.exists) {
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
       const movie =
         snap.data();
 
-      /*
-       * Users should only receive published movies.
-       */
       if (
         movie.published !== true
       ) {
         return res.status(404).json({
           error:
             "MOVIE_NOT_AVAILABLE",
+
           message:
-            "This movie is not currently available.",
+            "This movie is not currently available."
         });
       }
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
 
         movie: {
           movieId:
             snap.id,
-          ...movie,
-        },
+
+          ...movie
+        }
       });
     } catch (error) {
       console.error(
@@ -1854,21 +2041,21 @@ app.get(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "MOVIE_LOOKUP_FAILED",
+
         message:
           error.message ||
-          "Unable to load movie.",
+          "Unable to load movie."
       });
     }
   }
 );
 
-
-// ============================================================
-// ENTITLEMENT HELPER
-// ============================================================
+/* ============================================================
+   PREMIUM CHECK
+============================================================ */
 
 function isPremiumSubscriptionActive(
   userData
@@ -1886,69 +2073,62 @@ function isPremiumSubscriptionActive(
     ).toUpperCase();
 
   if (
-    entitlement !== "PREMIUM"
+    entitlement !==
+    "PREMIUM"
   ) {
     return false;
   }
 
-  const expiryValue =
+  const expiry =
     userData.subscriptionExpiry ||
     userData.subscriptionExpiresAt ||
     userData.premiumUntil ||
     userData.expiryDate ||
     null;
 
-  if (!expiryValue) {
+  if (!expiry) {
     return false;
   }
 
-  let expiryMillis = 0;
+  let millis = 0;
 
   if (
-    typeof expiryValue.toMillis ===
+    typeof expiry.toMillis ===
     "function"
   ) {
-    expiryMillis =
-      expiryValue.toMillis();
+    millis =
+      expiry.toMillis();
   } else if (
-    expiryValue._seconds
+    expiry._seconds != null
   ) {
-    expiryMillis =
+    millis =
       Number(
-        expiryValue._seconds
+        expiry._seconds
       ) * 1000;
   } else {
-    expiryMillis =
+    millis =
       new Date(
-        expiryValue
+        expiry
       ).getTime();
   }
 
-  if (
-    !Number.isFinite(
-      expiryMillis
-    )
-  ) {
-    return false;
-  }
-
   return (
-    expiryMillis >
-    Date.now()
+    Number.isFinite(millis) &&
+    millis > Date.now()
   );
 }
 
-
-// ============================================================
-// STREAM QUALITY NORMALIZATION
-// ============================================================
+/* ============================================================
+   QUALITY
+============================================================ */
 
 function normalizeQuality(
   quality
 ) {
   const value =
     String(
-      quality || "480p"
+      quality ||
+      "480p"
     )
       .trim()
       .toLowerCase();
@@ -1957,33 +2137,28 @@ function normalizeQuality(
     "480p",
     "720p",
     "1080p",
-    "4k",
+    "4k"
   ];
 
-  if (
-    !allowed.includes(value)
-  ) {
-    return null;
-  }
-
-  return value;
+  return allowed.includes(
+    value
+  )
+    ? value
+    : null;
 }
 
-
-// ============================================================
-// SECURE STREAM URL
-// ============================================================
+/* ============================================================
+   SECURE STREAM URL
+============================================================ */
 
 app.get(
   "/movies/:movieId/stream-url",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
       if (!requireStorageReady(res)) {
         return;
       }
@@ -1993,17 +2168,18 @@ app.get(
           req.params.movieId
         );
 
-      const requestedQuality =
+      const quality =
         normalizeQuality(
           req.query.q
         );
 
-      if (!requestedQuality) {
+      if (!quality) {
         return res.status(400).json({
           error:
             "INVALID_QUALITY",
+
           message:
-            "Supported qualities are 480p, 720p, 1080p and 4k.",
+            "Supported qualities are 480p, 720p, 1080p and 4k."
         });
       }
 
@@ -2017,8 +2193,9 @@ app.get(
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
@@ -2031,8 +2208,9 @@ app.get(
         return res.status(404).json({
           error:
             "MOVIE_NOT_AVAILABLE",
+
           message:
-            "Movie is not published.",
+            "Movie is not published."
         });
       }
 
@@ -2041,47 +2219,41 @@ app.get(
           req.userDocument
         );
 
-      /*
-       * FREE users can only request 480p.
-       */
       if (
         !premium &&
-        requestedQuality !==
-          "480p"
+        quality !== "480p"
       ) {
         return res.status(403).json({
           error:
             "PREMIUM_REQUIRED",
+
           message:
-            "This quality requires an active Premium subscription.",
+            "This quality requires an active Premium subscription."
         });
       }
 
       /*
-       * Quality-specific private objects.
-       *
-       * IMPORTANT:
-       * No fallback to a higher-quality original file.
-       * This prevents a Free user from receiving 1080p/4K
-       * through a mislabeled 480p response.
+       * No fallback to original file.
+       * Real quality object must exist.
        */
       const qualityPath =
-        `movies/${movieId}/video/${requestedQuality}/movie.mp4`;
+        `movies/${movieId}/video/${quality}/movie.mp4`;
 
-      const qualityFile =
+      const file =
         bucket.file(
           qualityPath
         );
 
       const [exists] =
-        await qualityFile.exists();
+        await file.exists();
 
       if (!exists) {
         return res.status(404).json({
           error:
             "QUALITY_NOT_AVAILABLE",
+
           message:
-            `${requestedQuality} version is not available for this movie.`,
+            `${quality} version is not available for this movie.`
         });
       }
 
@@ -2090,15 +2262,17 @@ app.get(
         15 * 60 * 1000;
 
       const [signedUrl] =
-        await qualityFile.getSignedUrl({
-          version: "v4",
+        await file.getSignedUrl({
+          version:
+            "v4",
 
-          action: "read",
+          action:
+            "read",
 
           expires:
             new Date(
               expiresAt
-            ),
+            )
         });
 
       const sessionId =
@@ -2117,8 +2291,7 @@ app.get(
 
           movieId,
 
-          quality:
-            requestedQuality,
+          quality,
 
           entitlement:
             premium
@@ -2141,10 +2314,10 @@ app.get(
             0,
 
           createdAt:
-            admin.firestore.FieldValue.serverTimestamp(),
+            admin.firestore.FieldValue.serverTimestamp()
         });
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
 
         streamUrl:
@@ -2152,15 +2325,14 @@ app.get(
 
         sessionId,
 
-        quality:
-          requestedQuality,
+        quality,
 
         entitlement:
           premium
             ? "PREMIUM"
             : "FREE",
 
-        expiresAt,
+        expiresAt
       });
     } catch (error) {
       console.error(
@@ -2168,42 +2340,43 @@ app.get(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "STREAM_URL_FAILED",
+
         message:
           error.message ||
-          "Unable to create secure stream URL.",
+          "Unable to create secure stream URL."
       });
     }
   }
 );
 
-
-// ============================================================
-// PLAYBACK HEARTBEAT
-// ============================================================
+/* ============================================================
+   PLAYBACK HEARTBEAT
+============================================================ */
 
 app.post(
   "/playback/session/heartbeat",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      const {
-        sessionId,
-      } = req.body || {};
+      const sessionId =
+        String(
+          req.body?.sessionId ||
+          ""
+        );
 
       if (!sessionId) {
         return res.status(400).json({
           error:
             "SESSION_ID_REQUIRED",
+
           message:
-            "Playback session ID is required.",
+            "Playback session ID is required."
         });
       }
 
@@ -2212,8 +2385,14 @@ app.post(
           .collection(
             "playbackSessions"
           )
-          .doc(
-            String(sessionId)
+          .doc(sessionId);
+
+      const date =
+        new Date()
+          .toISOString()
+          .slice(
+            0,
+            10
           );
 
       const usageRef =
@@ -2222,22 +2401,20 @@ app.post(
             "dailyPlaybackUsage"
           )
           .doc(
-            `${req.uid}_${new Date()
-              .toISOString()
-              .slice(0, 10)}`
+            `${req.uid}_${date}`
           );
 
       const result =
         await db.runTransaction(
-          async (transaction) => {
+          async (
+            transaction
+          ) => {
             const sessionSnap =
               await transaction.get(
                 sessionRef
               );
 
-            if (
-              !sessionSnap.exists
-            ) {
+            if (!sessionSnap.exists) {
               throw new Error(
                 "SESSION_NOT_FOUND"
               );
@@ -2267,68 +2444,60 @@ app.post(
                   0,
 
                 countedSeconds:
-                  0,
+                  0
               };
             }
 
             const now =
               Date.now();
 
-            let lastMillis =
+            let last =
               now;
 
+            const hb =
+              session.lastHeartbeatAt;
+
             if (
-              session.lastHeartbeatAt
-            ) {
-              if (
-                typeof session
-                  .lastHeartbeatAt
-                  .toMillis ===
+              hb &&
+              typeof hb.toMillis ===
                 "function"
-              ) {
-                lastMillis =
-                  session
-                    .lastHeartbeatAt
-                    .toMillis();
-              } else if (
-                session
-                  .lastHeartbeatAt
-                  ._seconds
-              ) {
-                lastMillis =
-                  Number(
-                    session
-                      .lastHeartbeatAt
-                      ._seconds
-                  ) *
-                  1000;
-              }
+            ) {
+              last =
+                hb.toMillis();
+            } else if (
+              hb?._seconds !=
+              null
+            ) {
+              last =
+                Number(
+                  hb._seconds
+                ) * 1000;
             }
 
-            let deltaSeconds =
+            let delta =
               Math.floor(
-                (now -
-                  lastMillis) /
-                  1000
+                (now - last) /
+                1000
               );
 
-            /*
-             * Protect against clock anomalies and
-             * huge client gaps.
-             */
             if (
-              deltaSeconds <
-              0
+              !Number.isFinite(
+                delta
+              ) ||
+              delta < 0
             ) {
-              deltaSeconds = 0;
+              delta = 0;
             }
 
-            if (
-              deltaSeconds >
-              30
-            ) {
-              deltaSeconds = 30;
-            }
+            /*
+             * Android sends heartbeat roughly every 10 sec.
+             * Cap abnormal gaps.
+             */
+            delta =
+              Math.min(
+                delta,
+                30
+              );
 
             const premium =
               isPremiumSubscriptionActive(
@@ -2344,8 +2513,8 @@ app.post(
 
                   totalCountedSeconds:
                     admin.firestore.FieldValue.increment(
-                      deltaSeconds
-                    ),
+                      delta
+                    )
                 }
               );
 
@@ -2357,10 +2526,10 @@ app.post(
                   null,
 
                 countedSeconds:
-                  deltaSeconds,
+                  delta,
 
                 entitlement:
-                  "PREMIUM",
+                  "PREMIUM"
               };
             }
 
@@ -2369,7 +2538,7 @@ app.post(
                 usageRef
               );
 
-            const currentUsage =
+            const current =
               usageSnap.exists
                 ? Number(
                     usageSnap.data()
@@ -2381,7 +2550,7 @@ app.post(
               Math.max(
                 0,
                 FREE_DAILY_LIMIT_SECONDS -
-                  currentUsage
+                current
               );
 
             if (
@@ -2394,7 +2563,7 @@ app.post(
                     false,
 
                   stoppedAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
+                    admin.firestore.FieldValue.serverTimestamp()
                 }
               );
 
@@ -2409,28 +2578,26 @@ app.post(
                   0,
 
                 entitlement:
-                  "FREE",
+                  "FREE"
               };
             }
 
             const counted =
               Math.min(
-                deltaSeconds,
+                delta,
                 remaining
               );
 
-            if (
-              usageSnap.exists
-            ) {
+            if (usageSnap.exists) {
               transaction.update(
                 usageRef,
                 {
                   seconds:
-                    currentUsage +
+                    current +
                     counted,
 
                   updatedAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
+                    admin.firestore.FieldValue.serverTimestamp()
                 }
               );
             } else {
@@ -2440,13 +2607,7 @@ app.post(
                   uid:
                     req.uid,
 
-                  date:
-                    new Date()
-                      .toISOString()
-                      .slice(
-                        0,
-                        10
-                      ),
+                  date,
 
                   seconds:
                     counted,
@@ -2455,7 +2616,7 @@ app.post(
                     admin.firestore.FieldValue.serverTimestamp(),
 
                   updatedAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
+                    admin.firestore.FieldValue.serverTimestamp()
                 }
               );
             }
@@ -2472,7 +2633,7 @@ app.post(
                   ),
 
                 active:
-                  counted > 0,
+                  counted > 0
               }
             );
 
@@ -2484,21 +2645,21 @@ app.post(
                 Math.max(
                   0,
                   remaining -
-                    counted
+                  counted
                 ),
 
               countedSeconds:
                 counted,
 
               entitlement:
-                "FREE",
+                "FREE"
             };
           }
         );
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
-        ...result,
+        ...result
       });
     } catch (error) {
       console.error(
@@ -2513,8 +2674,9 @@ app.post(
         return res.status(404).json({
           error:
             "SESSION_NOT_FOUND",
+
           message:
-            "Playback session was not found.",
+            "Playback session was not found."
         });
       }
 
@@ -2525,87 +2687,86 @@ app.post(
         return res.status(403).json({
           error:
             "SESSION_FORBIDDEN",
+
           message:
-            "This playback session does not belong to the current user.",
+            "This playback session does not belong to the current user."
         });
       }
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "HEARTBEAT_FAILED",
+
         message:
           error.message ||
-          "Playback heartbeat failed.",
+          "Playback heartbeat failed."
       });
     }
   }
 );
 
-
-// ============================================================
-// PLAYBACK SESSION STOP
-// ============================================================
+/* ============================================================
+   PLAYBACK STOP
+============================================================ */
 
 app.post(
   "/playback/session/stop",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      const {
-        sessionId,
-      } = req.body || {};
+      const sessionId =
+        String(
+          req.body?.sessionId ||
+          ""
+        );
 
       if (!sessionId) {
         return res.status(400).json({
           error:
             "SESSION_ID_REQUIRED",
+
           message:
-            "Playback session ID is required.",
+            "Playback session ID is required."
         });
       }
 
-      const sessionRef =
+      const ref =
         db
           .collection(
             "playbackSessions"
           )
-          .doc(
-            String(sessionId)
-          );
+          .doc(sessionId);
 
       const snap =
-        await sessionRef.get();
+        await ref.get();
 
       if (!snap.exists) {
         return res.status(404).json({
           error:
             "SESSION_NOT_FOUND",
+
           message:
-            "Playback session was not found.",
+            "Playback session was not found."
         });
       }
 
-      const session =
-        snap.data();
-
       if (
-        session.uid !==
+        snap.data().uid !==
         req.uid
       ) {
         return res.status(403).json({
           error:
             "SESSION_FORBIDDEN",
+
           message:
-            "This playback session does not belong to the current user.",
+            "This playback session does not belong to the current user."
         });
       }
 
-      await sessionRef.update({
+      await ref.update({
         active:
           false,
 
@@ -2613,46 +2774,48 @@ app.post(
           admin.firestore.FieldValue.serverTimestamp(),
 
         updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
+          admin.firestore.FieldValue.serverTimestamp()
       });
 
-      return res.status(200).json({
-        success: true,
+      res.status(200).json({
+        success:
+          true,
+
         sessionId,
-        stopped: true,
+
+        stopped:
+          true
       });
     } catch (error) {
       console.error(
-        "Playback session stop failed:",
+        "Playback stop failed:",
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "SESSION_STOP_FAILED",
+
         message:
           error.message ||
-          "Unable to stop playback session.",
+          "Unable to stop playback session."
       });
     }
   }
 );
 
-
-// ============================================================
-// USER - DAILY PLAYBACK USAGE
-// ============================================================
+/* ============================================================
+   DAILY USAGE
+============================================================ */
 
 app.get(
   "/playback/usage/today",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
       const date =
         new Date()
           .toISOString()
@@ -2661,15 +2824,14 @@ app.get(
             10
           );
 
-      const usageId =
-        `${req.uid}_${date}`;
-
       const snap =
         await db
           .collection(
             "dailyPlaybackUsage"
           )
-          .doc(usageId)
+          .doc(
+            `${req.uid}_${date}`
+          )
           .get();
 
       const seconds =
@@ -2685,8 +2847,9 @@ app.get(
           req.userDocument
         );
 
-      return res.status(200).json({
-        success: true,
+      res.status(200).json({
+        success:
+          true,
 
         date,
 
@@ -2703,103 +2866,85 @@ app.get(
             : Math.max(
                 0,
                 FREE_DAILY_LIMIT_SECONDS -
-                  seconds
+                seconds
               ),
 
         entitlement:
           premium
             ? "PREMIUM"
-            : "FREE",
+            : "FREE"
       });
     } catch (error) {
       console.error(
-        "Daily usage lookup failed:",
+        "Daily usage failed:",
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "USAGE_LOOKUP_FAILED",
+
         message:
           error.message ||
-          "Unable to load today's playback usage.",
+          "Unable to load today's playback usage."
       });
     }
   }
 );
 
-
-// ============================================================
-// END OF PART 2
-// ============================================================
-
-// PART 3 continues directly below this code.
-// Do NOT create another server.js file.
-// ============================================================
-// CINENOVA BACKEND - server.js
-// PART 3/3
-// Download + Razorpay + Webhook + Error Handler + Startup
-// ============================================================
-
-
-// ============================================================
-// PREMIUM DOWNLOAD URL
-// ============================================================
+/* ============================================================
+   PREMIUM DOWNLOAD
+============================================================ */
 
 app.get(
   "/movies/:movieId/download-url",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
       if (!requireStorageReady(res)) {
         return;
       }
 
-      const movieId =
-        String(req.params.movieId);
-
-      // --------------------------------------------------------
-      // DOWNLOAD IS PREMIUM ONLY
-      // --------------------------------------------------------
-
-      const premium =
-        isPremiumSubscriptionActive(
+      if (
+        !isPremiumSubscriptionActive(
           req.userDocument
-        );
-
-      if (!premium) {
+        )
+      ) {
         return res.status(403).json({
           error:
             "PREMIUM_REQUIRED",
+
           message:
-            "Movie downloads are available only with an active Premium subscription.",
+            "Movie downloads are available only with an active Premium subscription."
         });
       }
 
-      const movieRef =
-        db
+      const movieId =
+        String(
+          req.params.movieId
+        );
+
+      const snap =
+        await db
           .collection("movies")
-          .doc(movieId);
+          .doc(movieId)
+          .get();
 
-      const movieSnap =
-        await movieRef.get();
-
-      if (!movieSnap.exists) {
+      if (!snap.exists) {
         return res.status(404).json({
           error:
             "MOVIE_NOT_FOUND",
+
           message:
-            "Movie was not found.",
+            "Movie was not found."
         });
       }
 
       const movie =
-        movieSnap.data();
+        snap.data();
 
       if (
         movie.published !== true
@@ -2807,30 +2952,28 @@ app.get(
         return res.status(404).json({
           error:
             "MOVIE_NOT_AVAILABLE",
+
           message:
-            "This movie is not currently available.",
+            "Movie is not currently available."
         });
       }
 
-      /*
-       * Download only the actual private movie object.
-       *
-       * No fake/public fallback is used.
-       */
-      const objectPath =
-        movie.videoObjectPath;
-
-      if (!objectPath) {
+      if (
+        !movie.videoObjectPath
+      ) {
         return res.status(404).json({
           error:
             "VIDEO_NOT_AVAILABLE",
+
           message:
-            "A downloadable video asset is not available.",
+            "A downloadable video asset is not available."
         });
       }
 
       const file =
-        bucket.file(objectPath);
+        bucket.file(
+          movie.videoObjectPath
+        );
 
       const [exists] =
         await file.exists();
@@ -2839,24 +2982,23 @@ app.get(
         return res.status(404).json({
           error:
             "VIDEO_OBJECT_NOT_FOUND",
+
           message:
-            "The private video asset could not be found.",
+            "The private video asset could not be found."
         });
       }
 
-      /*
-       * Short-lived signed URL.
-       * The URL itself does not grant permanent public access.
-       */
       const expiresAt =
         Date.now() +
         15 * 60 * 1000;
 
-      const [signedUrl] =
+      const [url] =
         await file.getSignedUrl({
-          version: "v4",
+          version:
+            "v4",
 
-          action: "read",
+          action:
+            "read",
 
           expires:
             new Date(
@@ -2864,165 +3006,41 @@ app.get(
             ),
 
           responseDisposition:
-            "attachment",
+            "attachment"
         });
 
-      return res.status(200).json({
-        success: true,
+      res.status(200).json({
+        success:
+          true,
 
         movieId,
 
         downloadUrl:
-          signedUrl,
+          url,
 
-        expiresAt,
+        expiresAt
       });
     } catch (error) {
       console.error(
-        "Download URL generation failed:",
+        "Download URL failed:",
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "DOWNLOAD_URL_FAILED",
+
         message:
           error.message ||
-          "Unable to create secure download URL.",
+          "Unable to create secure download URL."
       });
     }
   }
 );
 
-
-// ============================================================
-// ADMIN - REPLACE MOVIE VIDEO
-// ============================================================
-
-app.post(
-  "/admin/movies/:movieId/replace-video",
-  authenticateFirebaseUser,
-  requireAdmin,
-  async (req, res) => {
-    try {
-      if (!requireFirebaseReady(res)) {
-        return;
-      }
-
-      if (!requireStorageReady(res)) {
-        return;
-      }
-
-      const movieId =
-        String(req.params.movieId);
-
-      const {
-        videoObjectPath,
-      } = req.body || {};
-
-      if (!videoObjectPath) {
-        return res.status(400).json({
-          error:
-            "VIDEO_OBJECT_PATH_REQUIRED",
-          message:
-            "videoObjectPath is required.",
-        });
-      }
-
-      const movieRef =
-        db
-          .collection("movies")
-          .doc(movieId);
-
-      const movieSnap =
-        await movieRef.get();
-
-      if (!movieSnap.exists) {
-        return res.status(404).json({
-          error:
-            "MOVIE_NOT_FOUND",
-          message:
-            "Movie was not found.",
-        });
-      }
-
-      const file =
-        bucket.file(
-          String(videoObjectPath)
-        );
-
-      const [exists] =
-        await file.exists();
-
-      if (!exists) {
-        return res.status(400).json({
-          error:
-            "VIDEO_OBJECT_NOT_FOUND",
-          message:
-            "The replacement video was not found in private storage.",
-        });
-      }
-
-      const [metadata] =
-        await file.getMetadata();
-
-      await movieRef.update({
-        videoObjectPath:
-          String(videoObjectPath),
-
-        assetSize:
-          Number(
-            metadata.size || 0
-          ),
-
-        contentType:
-          metadata.contentType ||
-          "video/mp4",
-
-        storageProvider:
-          "GCS_PRIVATE",
-
-        importStatus:
-          "COMPLETED",
-
-        updatedAt:
-          admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-      return res.status(200).json({
-        success: true,
-
-        movieId,
-
-        videoObjectPath:
-          String(videoObjectPath),
-
-        assetSize:
-          Number(
-            metadata.size || 0
-          ),
-      });
-    } catch (error) {
-      console.error(
-        "Replace video failed:",
-        error
-      );
-
-      return res.status(500).json({
-        error:
-          "REPLACE_VIDEO_FAILED",
-        message:
-          error.message ||
-          "Unable to replace movie video.",
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// RAZORPAY CONFIG CHECK
-// ============================================================
+/* ============================================================
+   RAZORPAY
+============================================================ */
 
 function isRazorpayConfigured() {
   return Boolean(
@@ -3030,11 +3048,6 @@ function isRazorpayConfigured() {
     RAZORPAY_KEY_SECRET
   );
 }
-
-
-// ============================================================
-// RAZORPAY API REQUEST HELPER
-// ============================================================
 
 async function razorpayRequest(
   path,
@@ -3066,8 +3079,8 @@ async function razorpayRequest(
           "Content-Type":
             "application/json",
 
-          ...(options.headers || {}),
-        },
+          ...(options.headers || {})
+        }
       }
     );
 
@@ -3081,7 +3094,7 @@ async function razorpayRequest(
       JSON.parse(text);
   } catch {
     data = {
-      raw: text,
+      raw: text
     };
   }
 
@@ -3097,40 +3110,35 @@ async function razorpayRequest(
     error.status =
       response.status;
 
-    error.data =
-      data;
-
     throw error;
   }
 
   return data;
 }
 
-
-// ============================================================
-// CREATE RAZORPAY ORDER
-// ============================================================
+/* ============================================================
+   CREATE PAYMENT ORDER
+============================================================ */
 
 app.post(
   "/payment/create-order",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
       if (!isRazorpayConfigured()) {
         return res.status(503).json({
           error:
             "PAYMENT_NOT_CONFIGURED",
+
           message:
-            "Razorpay payment service is not configured yet.",
+            "Razorpay payment service is not configured yet."
         });
       }
 
-      /*
-       * Fixed server-controlled price.
-       * Never trust price sent by Android.
-       */
-      const amountPaise =
+      const amount =
         PREMIUM_PRICE_INR * 100;
 
       const receipt =
@@ -3140,12 +3148,12 @@ app.post(
         await razorpayRequest(
           "/orders",
           {
-            method: "POST",
+            method:
+              "POST",
 
             body:
               JSON.stringify({
-                amount:
-                  amountPaise,
+                amount,
 
                 currency:
                   "INR",
@@ -3157,52 +3165,46 @@ app.post(
                     req.uid,
 
                   plan:
-                    "PREMIUM_MONTHLY",
-                },
-              }),
+                    "PREMIUM_MONTHLY"
+                }
+              })
           }
         );
 
-      /*
-       * Store payment/order metadata.
-       * This does NOT activate Premium.
-       */
-      if (db) {
-        await db
-          .collection("payments")
-          .doc(order.id)
-          .set({
-            paymentId:
-              order.id,
+      await db
+        .collection("payments")
+        .doc(order.id)
+        .set({
+          paymentId:
+            order.id,
 
-            razorpayOrderId:
-              order.id,
+          razorpayOrderId:
+            order.id,
 
-            uid:
-              req.uid,
+          uid:
+            req.uid,
 
-            amount:
-              amountPaise,
+          amount,
 
-            currency:
-              "INR",
+          currency:
+            "INR",
 
-            plan:
-              "PREMIUM_MONTHLY",
+          plan:
+            "PREMIUM_MONTHLY",
 
-            status:
-              "CREATED",
+          status:
+            "CREATED",
 
-            createdAt:
-              admin.firestore.FieldValue.serverTimestamp(),
+          createdAt:
+            admin.firestore.FieldValue.serverTimestamp(),
 
-            updatedAt:
-              admin.firestore.FieldValue.serverTimestamp(),
-          });
-      }
+          updatedAt:
+            admin.firestore.FieldValue.serverTimestamp()
+        });
 
-      return res.status(200).json({
-        success: true,
+      res.status(200).json({
+        success:
+          true,
 
         orderId:
           order.id,
@@ -3214,7 +3216,7 @@ app.post(
           order.currency,
 
         keyId:
-          RAZORPAY_KEY_ID,
+          RAZORPAY_KEY_ID
       });
     } catch (error) {
       console.error(
@@ -3222,7 +3224,7 @@ app.post(
         error
       );
 
-      return res.status(
+      res.status(
         error.status || 500
       ).json({
         error:
@@ -3230,21 +3232,20 @@ app.post(
 
         message:
           error.message ||
-          "Unable to create payment order.",
+          "Unable to create payment order."
       });
     }
   }
 );
 
-
-// ============================================================
-// RAZORPAY PAYMENT SIGNATURE VERIFICATION
-// ============================================================
+/* ============================================================
+   PAYMENT SIGNATURE
+============================================================ */
 
 function verifyRazorpayPaymentSignature({
   orderId,
   paymentId,
-  signature,
+  signature
 }) {
   if (
     !orderId ||
@@ -3255,7 +3256,7 @@ function verifyRazorpayPaymentSignature({
     return false;
   }
 
-  const expectedSignature =
+  const expected =
     crypto
       .createHmac(
         "sha256",
@@ -3266,151 +3267,149 @@ function verifyRazorpayPaymentSignature({
       )
       .digest("hex");
 
-  return crypto.timingSafeEqual(
-    Buffer.from(
-      expectedSignature
-    ),
+  const actual =
+    String(
+      signature
+    );
 
-    Buffer.from(
-      String(signature)
-    )
+  if (
+    expected.length !==
+    actual.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    Buffer.from(expected),
+    Buffer.from(actual)
   );
 }
 
-
-// ============================================================
-// VERIFY PAYMENT
-// ============================================================
+/* ============================================================
+   VERIFY PAYMENT
+============================================================ */
 
 app.post(
   "/payment/verify",
+
   authenticateFirebaseUser,
   requireUser,
+
   async (req, res) => {
     try {
       if (!isRazorpayConfigured()) {
         return res.status(503).json({
           error:
             "PAYMENT_NOT_CONFIGURED",
+
           message:
-            "Razorpay payment service is not configured.",
+            "Razorpay payment service is not configured."
         });
       }
 
       const {
-        razorpay_order_id:
-          razorpayOrderId,
-
-        razorpay_payment_id:
-          razorpayPaymentId,
-
-        razorpay_signature:
-          razorpaySignature,
-      } = req.body || {};
+        razorpay_order_id,
+        razorpay_payment_id,
+        razorpay_signature
+      } =
+        req.body || {};
 
       if (
-        !razorpayOrderId ||
-        !razorpayPaymentId ||
-        !razorpaySignature
+        !razorpay_order_id ||
+        !razorpay_payment_id ||
+        !razorpay_signature
       ) {
         return res.status(400).json({
           error:
             "PAYMENT_DETAILS_MISSING",
+
           message:
-            "Razorpay payment verification details are incomplete.",
+            "Razorpay payment verification details are incomplete."
         });
       }
 
-      /*
-       * First verify the cryptographic signature.
-       */
       const signatureValid =
         verifyRazorpayPaymentSignature({
           orderId:
-            razorpayOrderId,
+            razorpay_order_id,
 
           paymentId:
-            razorpayPaymentId,
+            razorpay_payment_id,
 
           signature:
-            razorpaySignature,
+            razorpay_signature
         });
 
       if (!signatureValid) {
         return res.status(400).json({
           error:
             "INVALID_PAYMENT_SIGNATURE",
+
           message:
-            "Payment signature verification failed.",
+            "Payment signature verification failed."
         });
       }
 
-      /*
-       * Verify that the Razorpay order belongs to this
-       * authenticated CineNova user.
-       */
-      const paymentRecordRef =
+      const paymentRef =
         db
           .collection("payments")
           .doc(
-            String(razorpayOrderId)
+            String(
+              razorpay_order_id
+            )
           );
 
-      const paymentRecordSnap =
-        await paymentRecordRef.get();
+      const paymentSnap =
+        await paymentRef.get();
 
-      if (
-        !paymentRecordSnap.exists
-      ) {
+      if (!paymentSnap.exists) {
         return res.status(400).json({
           error:
             "PAYMENT_ORDER_NOT_FOUND",
+
           message:
-            "Payment order was not created for this account.",
+            "Payment order was not created for this account."
         });
       }
 
-      const paymentRecord =
-        paymentRecordSnap.data();
+      const record =
+        paymentSnap.data();
 
       if (
-        paymentRecord.uid !==
+        record.uid !==
         req.uid
       ) {
         return res.status(403).json({
           error:
             "PAYMENT_ORDER_FORBIDDEN",
+
           message:
-            "This payment order does not belong to the current user.",
+            "This payment order does not belong to the current user."
         });
       }
 
-      /*
-       * Verify payment directly against Razorpay API.
-       */
       const payment =
         await razorpayRequest(
           `/payments/${encodeURIComponent(
-            razorpayPaymentId
+            razorpay_payment_id
           )}`,
           {
-            method: "GET",
+            method:
+              "GET"
           }
         );
 
       const order =
         await razorpayRequest(
           `/orders/${encodeURIComponent(
-            razorpayOrderId
+            razorpay_order_id
           )}`,
           {
-            method: "GET",
+            method:
+              "GET"
           }
         );
 
-      /*
-       * Amount and currency are controlled by the backend.
-       */
       if (
         Number(payment.amount) !==
         PREMIUM_PRICE_INR * 100
@@ -3418,8 +3417,9 @@ app.post(
         return res.status(400).json({
           error:
             "INVALID_PAYMENT_AMOUNT",
+
           message:
-            "Payment amount does not match the Premium plan price.",
+            "Payment amount does not match the Premium plan price."
         });
       }
 
@@ -3432,22 +3432,9 @@ app.post(
         return res.status(400).json({
           error:
             "INVALID_PAYMENT_CURRENCY",
-          message:
-            "Payment currency is invalid.",
-        });
-      }
 
-      if (
-        String(
-          order.currency
-        ).toUpperCase() !==
-        "INR"
-      ) {
-        return res.status(400).json({
-          error:
-            "INVALID_ORDER_CURRENCY",
           message:
-            "Payment order currency is invalid.",
+            "Payment currency is invalid."
         });
       }
 
@@ -3458,31 +3445,25 @@ app.post(
         return res.status(400).json({
           error:
             "INVALID_ORDER_AMOUNT",
+
           message:
-            "Payment order amount is invalid.",
+            "Payment order amount is invalid."
         });
       }
 
       if (
-        String(
-          payment.order_id
-        ) !==
-        String(
-          razorpayOrderId
-        )
+        String(payment.order_id) !==
+        String(razorpay_order_id)
       ) {
         return res.status(400).json({
           error:
             "PAYMENT_ORDER_MISMATCH",
+
           message:
-            "Payment and order do not match.",
+            "Payment and order do not match."
         });
       }
 
-      /*
-       * Razorpay's successful captured payment is the
-       * trusted activation boundary.
-       */
       if (
         String(
           payment.status
@@ -3492,56 +3473,45 @@ app.post(
         return res.status(400).json({
           error:
             "PAYMENT_NOT_CAPTURED",
+
           message:
-            "Payment has not been captured successfully.",
+            "Payment has not been captured successfully."
         });
       }
 
-      /*
-       * Idempotency:
-       * If this payment was already processed, return the
-       * current subscription state instead of extending it again.
-       */
-      const existingPayment =
+      const existing =
         await db
           .collection("payments")
           .where(
             "razorpayPaymentId",
             "==",
             String(
-              razorpayPaymentId
+              razorpay_payment_id
             )
           )
           .limit(1)
           .get();
 
-      if (
-        !existingPayment.empty
-      ) {
-        const userSnap =
-          await db
-            .collection("users")
-            .doc(req.uid)
-            .get();
-
-        const userData =
-          userSnap.exists
-            ? userSnap.data()
-            : {};
+      if (!existing.empty) {
+        const user =
+          await getUserDocument(
+            req.uid
+          );
 
         return res.status(200).json({
-          success: true,
+          success:
+            true,
 
           alreadyProcessed:
             true,
 
           entitlement:
-            userData.entitlement ||
+            user?.entitlement ||
             "FREE",
 
           subscriptionExpiry:
-            userData.subscriptionExpiry ||
-            null,
+            user?.subscriptionExpiry ||
+            null
         });
       }
 
@@ -3550,23 +3520,21 @@ app.post(
           .collection("users")
           .doc(req.uid);
 
-      const now =
+      const userSnap =
+        await userRef.get();
+
+      const user =
+        userSnap.exists
+          ? userSnap.data()
+          : {};
+
+      let baseDate =
         new Date();
 
-      /*
-       * Extend from current active expiry when applicable.
-       * Otherwise start from now.
-       */
-      let baseDate =
-        now;
-
       const currentExpiry =
-        req.userDocument
-          ?.subscriptionExpiry;
+        user.subscriptionExpiry;
 
-      if (
-        currentExpiry
-      ) {
+      if (currentExpiry) {
         let expiryMillis = 0;
 
         if (
@@ -3576,13 +3544,13 @@ app.post(
           expiryMillis =
             currentExpiry.toMillis();
         } else if (
-          currentExpiry._seconds
+          currentExpiry._seconds !=
+          null
         ) {
           expiryMillis =
             Number(
               currentExpiry._seconds
-            ) *
-            1000;
+            ) * 1000;
         } else {
           expiryMillis =
             new Date(
@@ -3595,7 +3563,7 @@ app.post(
             expiryMillis
           ) &&
           expiryMillis >
-            now.getTime()
+            Date.now()
         ) {
           baseDate =
             new Date(
@@ -3607,537 +3575,18 @@ app.post(
       const expiryDate =
         new Date(
           baseDate.getTime() +
-            PREMIUM_DURATION_DAYS *
-              24 *
-              60 *
-              60 *
-              1000
+          PREMIUM_DURATION_DAYS *
+          24 *
+          60 *
+          60 *
+          1000
         );
 
-      const batch =
-        db.batch();
-
-      batch.update(
-        userRef,
-        {
-          entitlement:
-            "PREMIUM",
-
-          subscriptionPlan:
-            "PREMIUM_MONTHLY",
-
-          subscriptionStatus:
-            "ACTIVE",
-
-          subscriptionExpiry:
-            admin.firestore.Timestamp.fromDate(
-              expiryDate
-            ),
-
-          updatedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        }
-      );
-
-      batch.update(
-        paymentRecordRef,
-        {
-          razorpayPaymentId:
-            String(
-              razorpayPaymentId
-            ),
-
-          status:
-            "CAPTURED",
-
-          amount:
-            Number(
-              payment.amount
-            ),
-
-          currency:
-            String(
-              payment.currency
-            ),
-
-          verifiedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-
-          updatedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        }
-      );
-
-      await batch.commit();
-
-      /*
-       * Separate payment record indexed by payment ID.
-       */
-      await db
-        .collection("payments")
-        .doc(
-          String(
-            razorpayPaymentId
-          )
-        )
-        .set({
-          paymentId:
-            String(
-              razorpayPaymentId
-            ),
-
-          razorpayPaymentId:
-            String(
-              razorpayPaymentId
-            ),
-
-          razorpayOrderId:
-            String(
-              razorpayOrderId
-            ),
-
-          uid:
-            req.uid,
-
-          amount:
-            Number(
-              payment.amount
-            ),
-
-          currency:
-            String(
-              payment.currency
-            ),
-
-          status:
-            "CAPTURED",
-
-          plan:
-            "PREMIUM_MONTHLY",
-
-          verifiedAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-
-          createdAt:
-            admin.firestore.FieldValue.serverTimestamp(),
-        });
-
-      /*
-       * Create a trusted notification after successful
-       * server-side payment verification.
-       */
-      try {
-        await db
-          .collection("users")
-          .doc(req.uid)
-          .collection("notifications")
-          .add({
-            type:
-              "SUBSCRIPTION_ACTIVATED",
-
-            title:
-              "Premium Activated",
-
-            message:
-              "Your CineNova Premium subscription is now active.",
-
-            read:
-              false,
-
-            createdAt:
-              admin.firestore.FieldValue.serverTimestamp(),
-
-            paymentId:
-              String(
-                razorpayPaymentId
-              ),
-          });
-      } catch (
-        notificationError
-      ) {
-        console.error(
-          "Payment notification creation failed:",
-          notificationError.message
-        );
-      }
-
-      return res.status(200).json({
-        success: true,
-
-        verified:
-          true,
-
-        entitlement:
-          "PREMIUM",
-
-        subscriptionPlan:
-          "PREMIUM_MONTHLY",
-
-        subscriptionExpiry:
-          expiryDate.toISOString(),
-
-        paymentId:
-          String(
-            razorpayPaymentId
-          ),
-
-        orderId:
-          String(
-            razorpayOrderId
-          ),
-      });
-    } catch (error) {
-      console.error(
-        "Payment verification failed:",
-        error
-      );
-
-      return res.status(
-        error.status || 500
-      ).json({
-        error:
-          "PAYMENT_VERIFICATION_FAILED",
-
-        message:
-          error.message ||
-          "Unable to verify payment.",
-      });
-    }
-  }
-);
-
-
-// ============================================================
-// RAZORPAY WEBHOOK
-// ============================================================
-
-function verifyRazorpayWebhookSignature(
-  rawBody,
-  signature
-) {
-  if (
-    !RAZORPAY_WEBHOOK_SECRET ||
-    !signature ||
-    !rawBody
-  ) {
-    return false;
-  }
-
-  const expected =
-    crypto
-      .createHmac(
-        "sha256",
-        RAZORPAY_WEBHOOK_SECRET
-      )
-      .update(rawBody)
-      .digest("hex");
-
-  return crypto.timingSafeEqual(
-    Buffer.from(
-      expected
-    ),
-
-    Buffer.from(
-      String(signature)
-    )
-  );
-}
-
-
-app.post(
-  "/payment/webhook",
-  async (req, res) => {
-    try {
-      if (
-        !RAZORPAY_WEBHOOK_SECRET
-      ) {
-        return res.status(503).json({
-          error:
-            "WEBHOOK_NOT_CONFIGURED",
-          message:
-            "Razorpay webhook secret is not configured.",
-        });
-      }
-
-      const signature =
-        req.headers[
-          "x-razorpay-signature"
-        ];
-
-      const rawBody =
-        req.rawBody;
-
-      if (!rawBody) {
-        return res.status(400).json({
-          error:
-            "RAW_BODY_MISSING",
-          message:
-            "Raw webhook body is required for signature verification.",
-        });
-      }
-
-      const valid =
-        verifyRazorpayWebhookSignature(
-          rawBody,
-          signature
-        );
-
-      if (!valid) {
-        return res.status(400).json({
-          error:
-            "INVALID_WEBHOOK_SIGNATURE",
-          message:
-            "Webhook signature verification failed.",
-        });
-      }
-
-      let payload;
-
-      try {
-        payload =
-          JSON.parse(
-            rawBody.toString(
-              "utf8"
-            )
-          );
-      } catch {
-        return res.status(400).json({
-          error:
-            "INVALID_WEBHOOK_JSON",
-          message:
-            "Webhook body is not valid JSON.",
-        });
-      }
-
-      const event =
-        String(
-          payload.event || ""
-        );
-
-      /*
-       * Webhook is intentionally treated as an additional
-       * trusted payment signal. It does not accept arbitrary
-       * client-provided success strings.
-       */
-      if (
-        event ===
-          "payment.captured" ||
-        event ===
-          "order.paid"
-      ) {
-        const paymentEntity =
-          payload?.payload
-            ?.payment
-            ?.entity;
-
-        if (
-          paymentEntity?.id
-        ) {
-          const paymentId =
-            String(
-              paymentEntity.id
-            );
-
-          const existing =
-            await db
-              .collection(
-                "payments"
-              )
-              .doc(paymentId)
-              .get();
-
-          /*
-           * If the normal /payment/verify endpoint has already
-           * processed it, webhook remains idempotent.
-           */
-          if (
-            existing.exists &&
-            existing.data()
-              ?.status ===
-              "CAPTURED"
-          ) {
-            return res.status(200).json({
-              success: true,
-              processed:
-                false,
-              reason:
-                "ALREADY_PROCESSED",
-            });
-          }
-
-          /*
-           * Webhook alone should not guess the CineNova user
-           * from arbitrary client data.
-           *
-           * The order created by CineNova contains the user ID
-           * in notes, so retrieve the order from Razorpay.
-           */
-          const orderId =
-            paymentEntity.order_id;
-
-          if (!orderId) {
-            return res.status(200).json({
-              success: true,
-              processed:
-                false,
-              reason:
-                "ORDER_ID_MISSING",
-            });
-          }
-
-          try {
-            const order =
-              await razorpayRequest(
-                `/orders/${encodeURIComponent(
-                  orderId
-                )}`,
-                {
-                  method:
-                    "GET",
-                }
-              );
-
-            const uid =
-              order?.notes?.uid;
-
-            if (!uid) {
-              return res.status(200).json({
-                success: true,
-                processed:
-                  false,
-                reason:
-                  "USER_REFERENCE_MISSING",
-              });
-            }
-
-            if (
-              Number(
-                paymentEntity.amount
-              ) !==
-              PREMIUM_PRICE_INR * 100
-            ) {
-              return res.status(200).json({
-                success: true,
-                processed:
-                  false,
-                reason:
-                  "AMOUNT_MISMATCH",
-              });
-            }
-
-            if (
-              String(
-                paymentEntity.currency
-              ).toUpperCase() !==
-              "INR"
-            ) {
-              return res.status(200).json({
-                success: true,
-                processed:
-                  false,
-                reason:
-                  "CURRENCY_MISMATCH",
-              });
-            }
-
-            if (
-              String(
-                paymentEntity.status
-              ).toLowerCase() !==
-              "captured"
-            ) {
-              return res.status(200).json({
-                success: true,
-                processed:
-                  false,
-                reason:
-                  "PAYMENT_NOT_CAPTURED",
-              });
-            }
-
-            /*
-             * Fetch current user state so webhook can extend
-             * an already-active subscription safely.
-             */
-            const userRef =
-              db
-                .collection("users")
-                .doc(String(uid));
-
-            const userSnap =
-              await userRef.get();
-
-            if (!userSnap.exists) {
-              return res.status(200).json({
-                success: true,
-                processed:
-                  false,
-                reason:
-                  "USER_NOT_FOUND",
-              });
-            }
-
-            const user =
-              userSnap.data();
-
-            let baseDate =
-              new Date();
-
-            const currentExpiry =
-              user.subscriptionExpiry;
-
-            if (
-              currentExpiry
-            ) {
-              let expiryMillis =
-                0;
-
-              if (
-                typeof currentExpiry.toMillis ===
-                "function"
-              ) {
-                expiryMillis =
-                  currentExpiry.toMillis();
-              } else if (
-                currentExpiry._seconds
-              ) {
-                expiryMillis =
-                  Number(
-                    currentExpiry._seconds
-                  ) *
-                  1000;
-              } else {
-                expiryMillis =
-                  new Date(
-                    currentExpiry
-                  ).getTime();
-              }
-
-              if (
-                Number.isFinite(
-                  expiryMillis
-                ) &&
-                expiryMillis >
-                  Date.now()
-              ) {
-                baseDate =
-                  new Date(
-                    expiryMillis
-                  );
-              }
-            }
-
-            const expiryDate =
-              new Date(
-                baseDate.getTime() +
-                  PREMIUM_DURATION_DAYS *
-                    24 *
-                    60 *
-                    60 *
-                    1000
-              );
-
-            await userRef.update({
+      await db.runTransaction(
+        async (transaction) => {
+          transaction.update(
+            userRef,
+            {
               entitlement:
                 "PREMIUM",
 
@@ -4153,77 +3602,463 @@ app.post(
                 ),
 
               updatedAt:
+                admin.firestore.FieldValue.serverTimestamp()
+            }
+          );
+
+          transaction.update(
+            paymentRef,
+            {
+              razorpayPaymentId:
+                String(
+                  razorpay_payment_id
+                ),
+
+              status:
+                "CAPTURED",
+
+              verifiedAt:
                 admin.firestore.FieldValue.serverTimestamp(),
-            });
 
-            await db
-              .collection(
-                "payments"
-              )
-              .doc(paymentId)
-              .set(
-                {
-                  paymentId,
+              updatedAt:
+                admin.firestore.FieldValue.serverTimestamp()
+            }
+          );
+        }
+      );
 
-                  razorpayPaymentId:
-                    paymentId,
+      res.status(200).json({
+        success:
+          true,
 
-                  razorpayOrderId:
-                    String(
-                      orderId
-                    ),
+        alreadyProcessed:
+          false,
 
-                  uid:
-                    String(uid),
+        entitlement:
+          "PREMIUM",
 
-                  amount:
-                    Number(
-                      paymentEntity.amount
-                    ),
+        subscriptionPlan:
+          "PREMIUM_MONTHLY",
 
-                  currency:
-                    String(
-                      paymentEntity.currency
-                    ),
+        subscriptionExpiry:
+          expiryDate.toISOString()
+      });
+    } catch (error) {
+      console.error(
+        "Payment verification failed:",
+        error
+      );
 
-                  status:
-                    "CAPTURED",
+      res.status(
+        error.status || 500
+      ).json({
+        error:
+          "PAYMENT_VERIFICATION_FAILED",
 
-                  plan:
-                    "PREMIUM_MONTHLY",
+        message:
+          error.message ||
+          "Unable to verify payment."
+      });
+    }
+  }
+);
 
-                  source:
-                    "RAZORPAY_WEBHOOK",
+/* ============================================================
+   RAZORPAY WEBHOOK
+============================================================ */
 
-                  verifiedAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
+function verifyWebhookSignature(
+  rawBody,
+  signature
+) {
+  if (
+    !RAZORPAY_WEBHOOK_SECRET ||
+    !rawBody ||
+    !signature
+  ) {
+    return false;
+  }
 
-                  createdAt:
-                    admin.firestore.FieldValue.serverTimestamp(),
-                },
-                {
-                  merge:
-                    true,
-                }
-              );
-          } catch (
-            webhookPaymentError
-          ) {
-            console.error(
-              "Webhook payment processing failed:",
-              webhookPaymentError.message
-            );
+  const expected =
+    crypto
+      .createHmac(
+        "sha256",
+        RAZORPAY_WEBHOOK_SECRET
+      )
+      .update(rawBody)
+      .digest("hex");
+
+  const actual =
+    String(
+      signature
+    );
+
+  if (
+    expected.length !==
+    actual.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    Buffer.from(expected),
+    Buffer.from(actual)
+  );
+}
+
+app.post(
+  "/payment/webhook",
+
+  async (req, res) => {
+    try {
+      const signature =
+        req.headers[
+          "x-razorpay-signature"
+        ];
+
+      const rawBody =
+        req.rawBody;
+
+      if (
+        !verifyWebhookSignature(
+          rawBody,
+          signature
+        )
+      ) {
+        return res.status(400).json({
+          error:
+            "INVALID_WEBHOOK_SIGNATURE",
+
+          message:
+            "Webhook signature verification failed."
+        });
+      }
+
+      const payload =
+        JSON.parse(
+          rawBody.toString(
+            "utf8"
+          )
+        );
+
+      const event =
+        String(
+          payload.event || ""
+        );
+
+      if (
+        event !==
+          "payment.captured" &&
+        event !==
+          "order.paid"
+      ) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      const payment =
+        payload?.payload
+          ?.payment
+          ?.entity;
+
+      if (!payment?.id) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      const paymentId =
+        String(
+          payment.id
+        );
+
+      const orderId =
+        String(
+          payment.order_id ||
+          ""
+        );
+
+      if (!orderId) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      const order =
+        await razorpayRequest(
+          `/orders/${encodeURIComponent(
+            orderId
+          )}`,
+          {
+            method:
+              "GET"
           }
+        );
+
+      const uid =
+        String(
+          order?.notes?.uid ||
+          ""
+        );
+
+      if (!uid) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      if (
+        Number(payment.amount) !==
+        PREMIUM_PRICE_INR * 100
+      ) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      if (
+        String(
+          payment.currency
+        ).toUpperCase() !==
+        "INR"
+      ) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      if (
+        String(
+          payment.status
+        ).toLowerCase() !==
+        "captured"
+      ) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      const paymentRef =
+        db
+          .collection("payments")
+          .doc(paymentId);
+
+      const existing =
+        await paymentRef.get();
+
+      if (
+        existing.exists &&
+        existing.data()
+          ?.status ===
+          "CAPTURED"
+      ) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false,
+
+          reason:
+            "ALREADY_PROCESSED"
+        });
+      }
+
+      const userRef =
+        db
+          .collection("users")
+          .doc(uid);
+
+      const userSnap =
+        await userRef.get();
+
+      if (!userSnap.exists) {
+        return res.status(200).json({
+          success:
+            true,
+
+          received:
+            true,
+
+          processed:
+            false
+        });
+      }
+
+      const user =
+        userSnap.data();
+
+      let baseDate =
+        new Date();
+
+      const currentExpiry =
+        user.subscriptionExpiry;
+
+      if (currentExpiry) {
+        let millis = 0;
+
+        if (
+          typeof currentExpiry.toMillis ===
+          "function"
+        ) {
+          millis =
+            currentExpiry.toMillis();
+        } else if (
+          currentExpiry._seconds !=
+          null
+        ) {
+          millis =
+            Number(
+              currentExpiry._seconds
+            ) * 1000;
+        } else {
+          millis =
+            new Date(
+              currentExpiry
+            ).getTime();
+        }
+
+        if (
+          Number.isFinite(millis) &&
+          millis > Date.now()
+        ) {
+          baseDate =
+            new Date(millis);
         }
       }
 
-      /*
-       * Always acknowledge a valid signed webhook.
-       * Razorpay can retry webhooks when acknowledgement fails.
-       */
-      return res.status(200).json({
-        success: true,
-        received: true,
+      const expiryDate =
+        new Date(
+          baseDate.getTime() +
+          PREMIUM_DURATION_DAYS *
+          24 *
+          60 *
+          60 *
+          1000
+        );
+
+      await userRef.update({
+        entitlement:
+          "PREMIUM",
+
+        subscriptionPlan:
+          "PREMIUM_MONTHLY",
+
+        subscriptionStatus:
+          "ACTIVE",
+
+        subscriptionExpiry:
+          admin.firestore.Timestamp.fromDate(
+            expiryDate
+          ),
+
+        updatedAt:
+          admin.firestore.FieldValue.serverTimestamp()
+      });
+
+      await paymentRef.set(
+        {
+          paymentId,
+
+          razorpayPaymentId:
+            paymentId,
+
+          razorpayOrderId:
+            orderId,
+
+          uid,
+
+          amount:
+            Number(
+              payment.amount
+            ),
+
+          currency:
+            "INR",
+
+          plan:
+            "PREMIUM_MONTHLY",
+
+          status:
+            "CAPTURED",
+
+          source:
+            "RAZORPAY_WEBHOOK",
+
+          verifiedAt:
+            admin.firestore.FieldValue.serverTimestamp(),
+
+          updatedAt:
+            admin.firestore.FieldValue.serverTimestamp()
+        },
+        {
+          merge:
+            true
+        }
+      );
+
+      res.status(200).json({
+        success:
+          true,
+
+        received:
+          true,
+
+        processed:
+          true
       });
     } catch (error) {
       console.error(
@@ -4231,38 +4066,37 @@ app.post(
         error
       );
 
-      return res.status(500).json({
+      res.status(500).json({
         error:
           "WEBHOOK_PROCESSING_FAILED",
+
         message:
           error.message ||
-          "Webhook processing failed.",
+          "Webhook processing failed."
       });
     }
   }
 );
 
-
-// ============================================================
-// 404 HANDLER
-// ============================================================
+/* ============================================================
+   404
+============================================================ */
 
 app.use(
   (req, res) => {
-    return res.status(404).json({
+    res.status(404).json({
       error:
         "NOT_FOUND",
 
       message:
-        `Route ${req.method} ${req.originalUrl} was not found.`,
+        `Route ${req.method} ${req.originalUrl} was not found.`
     });
   }
 );
 
-
-// ============================================================
-// GLOBAL ERROR HANDLER
-// ============================================================
+/* ============================================================
+   GLOBAL ERROR HANDLER
+============================================================ */
 
 app.use(
   (
@@ -4282,7 +4116,7 @@ app.use(
       return next(error);
     }
 
-    return res.status(500).json({
+    res.status(500).json({
       error:
         "INTERNAL_SERVER_ERROR",
 
@@ -4293,15 +4127,14 @@ app.use(
           : (
               error.message ||
               "Internal server error."
-            ),
+            )
     });
   }
 );
 
-
-// ============================================================
-// START SERVER
-// ============================================================
+/* ============================================================
+   START SERVER
+============================================================ */
 
 app.listen(
   PORT,
@@ -4370,10 +4203,4 @@ app.listen(
   }
 );
 
-
-// ============================================================
-// EXPORT
-// ============================================================
-
-module.exports = app;
 module.exports = app;
