@@ -167,7 +167,6 @@ try {
   process.exit(1);
 }
 
-const auth = admin.auth();
 
 /* =========================================================
    GOOGLE CLOUD STORAGE INITIALIZATION
