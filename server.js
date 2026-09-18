@@ -118,7 +118,6 @@ console.log('==============================================');
    FIREBASE ADMIN INITIALIZATION
 ========================================================= */
 
-let serviceAccount = null;
 
 if (process.env.FIREBASE_CONFIG_JSON) {
   try {
