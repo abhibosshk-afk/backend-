@@ -132,7 +132,7 @@ async function authenticateFirebaseUser(req, res, next) {
     });
   }
 
-  console.log(`[AUTH] Checking token for route: ${req.path}`);
+  `console.log(`\[AUTH\]Checking token for route:'+req.path.`);
   console.log(`[DIAGNOSTIC] Authorization Header length: ${authHeader.length}, prefix check passed.`);
   console.log(`[DIAGNOSTIC] Token format check: length=${idToken.length}, dots=${(idToken.match(/\./g) || []).length}`);
   try {
