@@ -10,7 +10,6 @@ const dotenv = require('dotenv');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 const { Storage } = require('@google-cloud/storage');
-const GCS_BUCKET_NAME =
   process.env.GCS_BUCKET_NAME || 'cinenova-1232d.firebasestorage.app';
 
 let serviceAccount = null;
