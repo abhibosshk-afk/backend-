@@ -10,6 +10,54 @@ const dotenv = require('dotenv');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 const { Storage } = require('@google-cloud/storage');
+const GCS_BUCKET_NAME =
+  process.env.GCS_BUCKET_NAME || 'cinenova-1232d.firebasestorage.app';
+
+let serviceAccount = null;
+
+if (process.env.FIREBASE_CONFIG_JSON) {
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
+
+    if (serviceAccount.private_key) {
+      serviceAccount.private_key =
+        serviceAccount.private_key.replace(/\\n/g, '\n');
+    }
+  } catch (err) {
+    console.error('Failed to parse FIREBASE_CONFIG_JSON:', err.message);
+  }
+}
+
+if (!admin.apps.length) {
+  if (serviceAccount) {
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount),
+      storageBucket: GCS_BUCKET_NAME
+    });
+  } else {
+    admin.initializeApp({
+      storageBucket: GCS_BUCKET_NAME
+    });
+  }
+}
+
+const { getFirestore } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
+
+const db = getFirestore();
+const auth = getAuth();
+
+const storage = serviceAccount
+  ? new Storage({
+      projectId: serviceAccount.project_id,
+      credentials: {
+        client_email: serviceAccount.client_email,
+        private_key: serviceAccount.private_key
+      }
+    })
+  : new Storage();
+
+const bucket = storage.bucket(GCS_BUCKET_NAME);
 const { Readable } = require('stream');
 
 dotenv.config();
