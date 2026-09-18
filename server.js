@@ -1,4 +1,4 @@
-/**
+**
  * CineNova Secure OTT Backend Service
  * 
  * Production-ready server for:
@@ -17,11 +17,13 @@ const crypto = require('crypto');
 const admin = require('firebase-admin');
 const { Storage } = require('@google-cloud/storage');
 const { Readable } = require('stream');
+
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'cinenova-movies-vault-secure';
+// The default storage bucket for cinenova-1232d is cinenova-1232d.firebasestorage.app
+const GCS_BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'cinenova-1232d.firebasestorage.app';
 
 // Payment Provider Configuration
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_cinenova_live';
@@ -32,25 +34,72 @@ const UPI_PAYEE_NAME = process.env.UPI_PAYEE_NAME || 'CineNova Admin';
 const VIP_PLAN_PRICE_INR = 10.00;
 const VIP_PLAN_DURATION_DAYS = 30;
 
+console.log('--- CineNova Backend Startup Diagnostics ---');
+console.log('GOOGLE_CLOUD_PROJECT present:', !!process.env.GOOGLE_CLOUD_PROJECT);
+console.log('GCS_BUCKET_NAME present:', !!process.env.GCS_BUCKET_NAME);
+console.log('FIREBASE_CONFIG_JSON present:', !!process.env.FIREBASE_CONFIG_JSON);
+console.log('GOOGLE_WEB_CLIENT_ID present:', !!process.env.GOOGLE_WEB_CLIENT_ID);
+console.log('GOOGLE_WEB_CLIENT_SECRET present:', !!process.env.GOOGLE_WEB_CLIENT_SECRET);
+console.log('--------------------------------------------');
+
 // Initialize Firebase Admin SDK
 // When running in Google Cloud Run or Cloud Functions, Application Default Credentials (ADC) are used automatically.
+let serviceAccount = null;
+if (process.env.FIREBASE_CONFIG_JSON) {
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
+  } catch (err) {
+    console.error('Failed to parse FIREBASE_CONFIG_JSON:', err.message);
+  }
+}
+
 if (!admin.apps.length) {
-  if (process.env.FIREBASE_CONFIG_JSON) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_CONFIG_JSON);
+  if (serviceAccount) {
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+      credential: admin.cert(serviceAccount)
     });
   } else {
     admin.initializeApp();
   }
 }
 
-const db = admin.firestore();
-const storage = new Storage();
+const { getFirestore } = require('firebase-admin/firestore');
+const { getAuth } = require('firebase-admin/auth');
+
+const db = getFirestore();
+const auth = getAuth();
+const storage = serviceAccount
+  ? new Storage({
+      projectId: serviceAccount.project_id,
+      credentials: {
+        client_email: serviceAccount.client_email,
+        // CRITICAL FIX: Render environment variables often double-escape newlines in JSON strings.
+        // The firebase-admin SDK automatically handles \n internally, but @google-cloud/storage DOES NOT.
+        // This causes getSignedUrl() to throw DECODER routines::unsupported (HTTP 500) because the private key is malformed.
+        private_key: serviceAccount.private_key ? serviceAccount.private_key.replace(/\\n/g, '\n') : undefined
+      }
+    })
+  : new Storage();
 const bucket = storage.bucket(GCS_BUCKET_NAME);
 
 app.use(cors({ origin: true }));
 app.use(express.json());
+app.get('/admin/diagnostics', (req, res) => {
+  let initError = null;
+  try {
+    admin.auth();
+  } catch (e) {
+    initError = e.message;
+  }
+  const apps = admin.apps.length;
+  const projectId = admin.apps[0]?.options?.projectId || process.env.GOOGLE_CLOUD_PROJECT || 'Not Set';
+  res.json({
+    apps_initialized: apps,
+    project_id: projectId,
+    init_error: initError,
+    env_config_present: !!process.env.FIREBASE_CONFIG_JSON
+  });
+});
 app.use(morgan('combined'));
 
 // ==========================================
@@ -60,25 +109,42 @@ app.use(morgan('combined'));
 /**
  * Middleware to verify Firebase ID Token in Authorization header
  */
+const DESIGNATED_ADMIN_EMAILS = [
+  'abhisheksuniyar737@gmail.com',
+  'abisheksuniyar737@gmail.com',
+  'abhibosshk@gmail.com'
+];
+
 async function authenticateFirebaseUser(req, res, next) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  if (!authHeader || !authHeader.trim().toLowerCase().startsWith('bearer ')) {
     return res.status(401).json({
       error: 'UNAUTHORIZED',
       message: 'Missing or invalid Authorization header. Provide a valid Bearer Firebase ID Token.'
     });
   }
 
-  const idToken = authHeader.split('Bearer ')[1];
+  const idToken = authHeader.trim().slice(7).trim();
+  if (!idToken) {
+    return res.status(401).json({
+      error: 'UNAUTHORIZED',
+      message: 'Bearer token is empty or invalid.'
+    });
+  }
+
+  console.log(`[AUTH] Checking token for route: ${req.path}`);
+  console.log(`[DIAGNOSTIC] Authorization Header length: ${authHeader.length}, prefix check passed.`);
+  console.log(`[DIAGNOSTIC] Token format check: length=${idToken.length}, dots=${(idToken.match(/\./g) || []).length}`);
   try {
-    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const decodedToken = await auth.verifyIdToken(idToken);
     req.user = decodedToken;
+    console.log(`[AUTH] Token valid. UID: ${decodedToken.uid}`);
     next();
   } catch (error) {
-    console.error('Firebase token verification error:', error.message);
+    console.error(`[AUTH ERROR] Firebase token verification error on ${req.path}:`, error.message);
     return res.status(401).json({
       error: 'INVALID_TOKEN',
-      message: 'Firebase token expired or invalid.'
+      message: `Firebase token expired or invalid: ${error.message}`
     });
   }
 }
@@ -88,28 +154,40 @@ async function authenticateFirebaseUser(req, res, next) {
  */
 async function requireAdminRole(req, res, next) {
   if (!req.user) {
+    console.error('[AUTH ERROR] User not authenticated in requireAdminRole');
     return res.status(401).json({ error: 'UNAUTHORIZED', message: 'User not authenticated.' });
   }
 
   try {
-    // Check Custom Claim first or fetch Firestore User Document
+    console.log(`[AUTH] Checking admin role for UID: ${req.user.uid}`);
+    
+    // Check Custom Claim first or designated admin emails
     if (req.user.admin === true || req.user.role === 'ADMIN') {
+      console.log(`[AUTH] Admin granted via custom claims for UID: ${req.user.uid}`);
+      return next();
+    }
+
+    if (req.user.email && DESIGNATED_ADMIN_EMAILS.includes(req.user.email.toLowerCase())) {
+      console.log(`[AUTH] Admin granted via designated email for UID: ${req.user.uid}`);
       return next();
     }
 
     const userDoc = await db.collection('users').doc(req.user.uid).get();
     if (!userDoc.exists) {
+      console.warn(`[AUTH] User document not found for UID: ${req.user.uid}`);
       return res.status(403).json({ error: 'ACCESS_DENIED', message: 'User account profile not found.' });
     }
 
     const userData = userDoc.data();
     if (userData.role !== 'ADMIN' || userData.isBlocked === true) {
+      console.warn(`[AUTH] Access denied. Role: ${userData.role}, Blocked: ${userData.isBlocked} for UID: ${req.user.uid}`);
       return res.status(403).json({
         error: 'ACCESS_DENIED',
         message: 'Administrator permissions required to perform this action.'
       });
     }
 
+    console.log(`[AUTH] Admin granted via Firestore role for UID: ${req.user.uid}`);
     req.adminData = userData;
     next();
   } catch (error) {
@@ -229,15 +307,101 @@ app.post('/admin/movies/create-upload-session', authenticateFirebaseUser, requir
     });
   }
 });
+
 // ==========================================
 // 2b. GOOGLE DRIVE TO PRIVATE CLOUD IMPORT (Admin only)
 // Direct cloud-to-cloud transfer from Google Drive to CineNova private GCS bucket.
 // The movie is never downloaded to the client phone.
 // The original Google Drive file remains completely untouched.
 // ==========================================
+
+async function exchangeGoogleServerAuthCode(authCode) {
+  const clientId = process.env.GOOGLE_WEB_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_WEB_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) {
+    const missing = [];
+    if (!clientId) missing.push('GOOGLE_WEB_CLIENT_ID');
+    if (!clientSecret) missing.push('GOOGLE_WEB_CLIENT_SECRET');
+    throw new Error(`Server OAuth credentials missing in environment: ${missing.join(', ')}`);
+  }
+
+  const tokenEndpoint = 'https://oauth2.googleapis.com/token';
+  const params = new URLSearchParams({
+    code: authCode,
+    client_id: clientId,
+    client_secret: clientSecret,
+    redirect_uri: '', // Required empty string for Android Server Auth Code flow
+    grant_type: 'authorization_code'
+  });
+
+  const response = await fetch(tokenEndpoint, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString()
+  });
+
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => '');
+    console.error(`[OAUTH EXCHANGE ERROR] Google OAuth token exchange failed (HTTP ${response.status})`);
+    let errorDetail = 'Code exchange failed';
+    try {
+      const parsed = JSON.parse(errorBody);
+      errorDetail = parsed.error_description || parsed.error || errorDetail;
+    } catch (_) {}
+    throw new Error(`Google token exchange error: ${errorDetail}`);
+  }
+
+  const tokenData = await response.json();
+  return {
+    accessToken: tokenData.access_token,
+    refreshToken: tokenData.refresh_token,
+    expiresIn: tokenData.expires_in
+  };
+}
+
+async function refreshGoogleDriveAccessToken(refreshToken) {
+  const clientId = process.env.GOOGLE_WEB_CLIENT_ID || process.env.GOOGLE_CLIENT_ID;
+  const clientSecret = process.env.GOOGLE_WEB_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    return null;
+  }
+
+  const params = new URLSearchParams({
+    refresh_token: refreshToken,
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'refresh_token'
+  });
+
+  const response = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: params.toString()
+  });
+
+  if (!response.ok) {
+    console.error(`[OAUTH REFRESH ERROR] Failed to refresh token (HTTP ${response.status})`);
+    return null;
+  }
+
+  const tokenData = await response.json();
+  return tokenData.access_token;
+}
+
 app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdminRole, async (req, res) => {
+  let gcsFile = null;
+  let destinationPath = null;
   try {
-    const { movieId, driveFileId, accessToken, fileCategory = 'video' } = req.body;
+    const {
+      movieId,
+      driveFileId,
+      serverAuthCode,
+      authCode,
+      accessToken,
+      fileCategory = 'video'
+    } = req.body;
 
     if (!movieId || !driveFileId) {
       return res.status(400).json({
@@ -248,7 +412,6 @@ app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdm
     }
 
     // Determine target GCS path based on category
-    let destinationPath;
     if (fileCategory === 'video') {
       destinationPath = `movies/${movieId}/video/original/movie.mp4`;
     } else if (fileCategory === 'poster') {
@@ -259,84 +422,177 @@ app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdm
       destinationPath = `movies/${movieId}/media/${driveFileId}`;
     }
 
-    const gcsFile = bucket.file(destinationPath);
+    gcsFile = bucket.file(destinationPath);
 
-    // Duplicate Protection: Check if already present in private GCS
+    // Duplicate Protection: Check if already verified and present in private GCS
     const [alreadyExists] = await gcsFile.exists();
     if (alreadyExists) {
-      console.log(`[DRIVE IMPORT] Object ${destinationPath} already exists in GCS, reusing existing asset.`);
-      await db.collection('movies').doc(movieId).set({
-        id: movieId,
-        driveVideoFileId: driveFileId,
-        videoObjectPath: destinationPath,
-        updatedAt: Date.now()
-      }, { merge: true });
+      const [meta] = await gcsFile.getMetadata().catch(() => [null]);
+      const existingSize = parseInt(meta?.size, 10) || 0;
+      if (existingSize > 0) {
+        console.log(`[DRIVE IMPORT] Object ${destinationPath} already verified in GCS (${existingSize} bytes), reusing existing asset.`);
+        await db.collection('movies').doc(movieId).set({
+          id: movieId,
+          driveVideoFileId: driveFileId,
+          videoObjectPath: destinationPath,
+          assetSize: existingSize,
+          storageProvider: 'GCS_PRIVATE',
+          importStatus: 'COMPLETED',
+          updatedAt: Date.now()
+        }, { merge: true });
 
-      return res.status(200).json({
-        success: true,
-        movieId,
-        copiedDriveFileId: driveFileId,
-        destinationPath,
-        message: 'Existing cloud asset reused for movie.'
-      });
-    }
-
-    // Direct server-side streaming transfer from Google Drive API to GCS
-    if (accessToken) {
-      try {
-        const driveUrl = `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`;
-        const driveResponse = await fetch(driveUrl, {
-          headers: { Authorization: `Bearer ${accessToken}` }
-        });
-
-        if (!driveResponse.ok) {
-          const errText = await driveResponse.text();
-          console.error(`[DRIVE IMPORT ERROR] Google Drive API error (${driveResponse.status}):`, errText);
-          return res.status(driveResponse.status).json({
-            success: false,
-            error: 'DRIVE_DOWNLOAD_FAILED',
-            message: `Failed to fetch file from Google Drive: ${driveResponse.statusText}`
-          });
-        }
-
-        // Pipe directly from Google Drive HTTP stream to Google Cloud Storage write stream
-        await new Promise((resolve, reject) => {
-          const writeStream = gcsFile.createWriteStream({
-            resumable: true,
-            metadata: {
-              contentType: driveResponse.headers.get('content-type') || 'video/mp4',
-              metadata: {
-                originalDriveFileId: driveFileId,
-                importedBy: req.user.uid,
-                importedAt: new Date().toISOString()
-              }
-            }
-          });
-
-          const readStream = Readable.fromWeb ? Readable.fromWeb(driveResponse.body) : driveResponse.body;
-
-          readStream
-            .pipe(writeStream)
-            .on('finish', resolve)
-            .on('error', reject);
-        });
-
-        console.log(`[DRIVE IMPORT SUCCESS] Streamed Drive file ${driveFileId} directly to GCS ${destinationPath}`);
-      } catch (streamErr) {
-        console.error('[DRIVE STREAM ERROR]', streamErr);
-        return res.status(500).json({
-          success: false,
-          error: 'DRIVE_STREAM_ERROR',
-          message: 'Error streaming file to cloud storage: ' + streamErr.message
+        return res.status(200).json({
+          success: true,
+          movieId,
+          copiedDriveFileId: driveFileId,
+          destinationPath,
+          assetSize: existingSize,
+          message: 'Existing cloud asset reused for movie.'
         });
       }
     }
 
-    // Update Firestore movie record
+    const code = serverAuthCode || authCode;
+    if (!code) {
+      if (process.env.ALLOW_LEGACY_DRIVE_TOKEN === 'true' && accessToken) {
+        console.warn('[DRIVE IMPORT WARNING] Using legacy direct accessToken fallback (non-production path only)');
+      } else {
+        return res.status(400).json({
+          success: false,
+          error: 'SERVER_AUTH_CODE_REQUIRED',
+          message: 'Secure serverAuthCode is required for Google Drive import. Production Drive import uses serverAuthCode only.'
+        });
+      }
+    }
+
+    // Resolve active OAuth Access Token:
+    // Production path exchanges server auth code server-to-server
+    let activeToken = null;
+    let refreshToken = null;
+
+    if (code) {
+      try {
+        const exchangeResult = await exchangeGoogleServerAuthCode(code);
+        activeToken = exchangeResult.accessToken;
+        refreshToken = exchangeResult.refreshToken;
+        console.log('[DRIVE IMPORT] Server auth code successfully exchanged with Google OAuth.');
+      } catch (exchangeErr) {
+        console.error('[DRIVE IMPORT] Code exchange failure:', exchangeErr.message);
+        return res.status(400).json({
+          success: false,
+          error: 'OAUTH_EXCHANGE_FAILED',
+          message: exchangeErr.message
+        });
+      }
+    } else if (process.env.ALLOW_LEGACY_DRIVE_TOKEN === 'true' && accessToken) {
+      activeToken = accessToken;
+    } else {
+      return res.status(400).json({
+        success: false,
+        error: 'SERVER_AUTH_CODE_REQUIRED',
+        message: 'serverAuthCode is required.'
+      });
+    }
+
+    // Fetch directly from Google Drive API with read-only stream
+    // Google Drive file is ONLY the source - untouched, unmodified, never deleted
+    const driveUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(driveFileId)}?alt=media&supportsAllDrives=true`;
+    let driveResponse = await fetch(driveUrl, {
+      headers: { Authorization: `Bearer ${activeToken}` }
+    });
+
+    // Handle token expiry during long imports if refresh token is available
+    if (driveResponse.status === 401 && refreshToken) {
+      console.log('[DRIVE IMPORT] Access token expired, refreshing using refresh token...');
+      const refreshedToken = await refreshGoogleDriveAccessToken(refreshToken);
+      if (refreshedToken) {
+        activeToken = refreshedToken;
+        driveResponse = await fetch(driveUrl, {
+          headers: { Authorization: `Bearer ${activeToken}` }
+        });
+      }
+    }
+
+    if (!driveResponse.ok) {
+      console.error(`[DRIVE IMPORT ERROR] Google Drive API error (HTTP ${driveResponse.status})`);
+      return res.status(driveResponse.status).json({
+        success: false,
+        error: 'DRIVE_FETCH_FAILED',
+        message: `Failed to fetch file from Google Drive (HTTP ${driveResponse.status})`
+      });
+    }
+
+    // Pipe directly from Google Drive HTTP stream to Google Cloud Storage write stream
+    // Phone never downloads the movie bytes
+    try {
+      await new Promise((resolve, reject) => {
+        const writeStream = gcsFile.createWriteStream({
+          resumable: true,
+          metadata: {
+            contentType: driveResponse.headers.get('content-type') || 'video/mp4',
+            metadata: {
+              originalDriveFileId: driveFileId,
+              importedBy: req.user.uid,
+              importedAt: new Date().toISOString()
+            }
+          }
+        });
+
+        const readStream = (driveResponse.body && typeof driveResponse.body.pipe === 'function')
+          ? driveResponse.body
+          : (Readable.fromWeb ? Readable.fromWeb(driveResponse.body) : driveResponse.body);
+
+        writeStream.on('error', reject);
+        readStream.on('error', reject);
+        writeStream.on('finish', resolve);
+
+        readStream.pipe(writeStream);
+      });
+
+      console.log(`[DRIVE IMPORT SUCCESS] Transferred Drive file ${driveFileId} directly to GCS ${destinationPath}`);
+    } catch (streamErr) {
+      // Safe cleanup of incomplete GCS object
+      console.error('[DRIVE STREAM ERROR] Streaming failed or interrupted. Cleaning up incomplete GCS object:', streamErr.message);
+      if (gcsFile) {
+        await gcsFile.delete({ ignoreNotFound: true }).catch(() => {});
+      }
+      return res.status(500).json({
+        success: false,
+        error: 'DRIVE_STREAM_ERROR',
+        message: 'Error streaming file to cloud storage: ' + streamErr.message
+      });
+    }
+
+    // Verify the transferred GCS object before marking movie import complete
+    const [finalExists] = await gcsFile.exists();
+    if (!finalExists) {
+      return res.status(500).json({
+        success: false,
+        error: 'VERIFICATION_FAILED',
+        message: 'Transferred asset does not exist in destination storage.'
+      });
+    }
+
+    const [finalMeta] = await gcsFile.getMetadata().catch(() => [null]);
+    const assetSize = parseInt(finalMeta?.size, 10) || 0;
+    if (assetSize <= 0) {
+      // Clean up empty/corrupted object
+      await gcsFile.delete({ ignoreNotFound: true }).catch(() => {});
+      return res.status(500).json({
+        success: false,
+        error: 'EMPTY_ASSET_CORRUPTED',
+        message: 'Transferred file is empty (0 bytes). Incomplete object cleaned up.'
+      });
+    }
+
+    // Store ONLY the required private cloud reference in Firestore
     await db.collection('movies').doc(movieId).set({
       id: movieId,
       driveVideoFileId: driveFileId,
       videoObjectPath: destinationPath,
+      assetSize,
+      storageProvider: 'GCS_PRIVATE',
+      importStatus: 'COMPLETED',
       updatedAt: Date.now()
     }, { merge: true });
 
@@ -345,11 +601,15 @@ app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdm
       movieId,
       copiedDriveFileId: driveFileId,
       destinationPath,
+      assetSize,
       message: 'File successfully imported from Google Drive to CineNova private cloud storage.'
     });
 
   } catch (error) {
-    console.error('Error importing from Drive:', error);
+    console.error('[DRIVE IMPORT ERROR]', error.message);
+    if (gcsFile) {
+      await gcsFile.delete({ ignoreNotFound: true }).catch(() => {});
+    }
     return res.status(500).json({
       success: false,
       error: 'DRIVE_IMPORT_FAILED',
@@ -357,6 +617,7 @@ app.post('/admin/movies/import-from-drive', authenticateFirebaseUser, requireAdm
     });
   }
 });
+
 // ==========================================
 // 3. ADMIN FINALIZE MOVIE UPLOAD
 // ==========================================
@@ -1177,4 +1438,5 @@ if (require.main === module) { app.listen(PORT, () => {
   console.log(`=============================================`);
 });
 }
+module.exports = app;
 module.exports = app;
